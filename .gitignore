@@ -1,0 +1,21 @@
+# Secrets, local credentials and machine-specific data
+.env
+*.env
+*_token.txt
+*credentials*
+*auth.json
+*tokens.json
+
+# Local quota snapshots / personal account identifiers
+quota_identities.local.json
+quota_snapshot.json
+agy_quota_snapshot.json
+
+# Runtime files
+*.log
+*.lock
+__pycache__/
+*.py[cod]
+
+# Local test artifacts
+*.png

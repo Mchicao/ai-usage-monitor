@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🤖 Dashboard de Cuota IA</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            width: 100%;
+            max-width: 900px;
+        }
+
+        .header h1 {
+            font-size: 32px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #58a6ff, #bc8cff, #f778ba);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }
+
+        .header .subtitle {
+            font-size: 15px;
+            color: #8b949e;
+        }
+
+        .header .last-update {
+            font-size: 12px;
+            color: #6e7681;
+            margin-top: 6px;
+        }
+
+        .refresh-btn {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #58a6ff;
+            padding: 8px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 14px;
+            transition: all 0.2s;
+            font-weight: 600;
+        }
+
+        .refresh-btn:hover {
+            background: #30363d;
+            border-color: #58a6ff;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 24px;
+            width: 100%;
+            max-width: 1100px;
+        }
+
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 24px;
+            transition: all 0.3s ease;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .card:hover {
+            border-color: #58a6ff;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(88, 166, 255, 0.08);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 18px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid #21262d;
+        }
+
+        .card-icon {
+            font-size: 32px;
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #e6edf3;
+        }
+
+        .card-status {
+            margin-left: auto;
+            font-size: 12px;
+            padding: 3px 12px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+
+        .status-ok {
+            background: rgba(63, 185, 80, 0.15);
+            color: #3fb950;
+            border: 1px solid rgba(63, 185, 80, 0.3);
+        }
+
+        .status-error {
+            background: rgba(248, 81, 73, 0.15);
+            color: #f85149;
+            border: 1px solid rgba(248, 81, 73, 0.3);
+        }
+
+        .status-warning {
+            background: rgba(187, 128, 9, 0.15);
+            color: #bb8009;
+            border: 1px solid rgba(187, 128, 9, 0.3);
+        }
+
+        .status-info {
+            background: rgba(56, 139, 253, 0.15);
+            color: #58a6ff;
+            border: 1px solid rgba(56, 139, 253, 0.3);
+        }
+
+        .model-row {
+            margin-bottom: 14px;
+        }
+
+        .model-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            margin-bottom: 4px;
+            color: #c9d1d9;
+        }
+
+        .model-name {
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 230px;
+        }
+
+        .model-pct {
+            font-weight: 700;
+        }
+
+        .progress-container {
+            width: 100%;
+            height: 8px;
+            background-color: #30363d;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 4px;
+        }
+
+        .progress-bar {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.5s ease-in-out;
+        }
+
+        .bg-green { background-color: #2ea44f; }
+        .bg-yellow { background-color: #d29922; }
+        .bg-red { background-color: #f85149; }
+
+        .reset-text {
+            font-size: 11px;
+            color: #8b949e;
+            display: block;
+            margin-top: 2px;
+        }
+
+        .models-list {
+            max-height: 320px;
+            overflow-y: auto;
+            padding-right: 6px;
+        }
+
+        /* Scrollbar custom */
+        .models-list::-webkit-scrollbar {
+            width: 6px;
+        }
+        .models-list::-webkit-scrollbar-track {
+            background: #161b22;
+        }
+        .models-list::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 3px;
+        }
+
+        .info-label {
+            font-size: 12px;
+            color: #8b949e;
+            text-transform: uppercase;
+            font-weight: 600;
+            margin-bottom: 10px;
+            letter-spacing: 0.5px;
+        }
+
+        .note-box {
+            background-color: #1f242c;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 12px;
+            font-size: 12px;
+            color: #8b949e;
+            margin-top: auto;
+            line-height: 1.4;
+        }
+
+        .model-badge {
+            background: #21262d;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #8b949e;
+            margin-left: 6px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🛸 AI Usage Dashboard</h1>
+        <div class="subtitle">Monitoreo en tiempo real de tus cuotas de Antigravity, Codex y Z.AI</div>
+        <div class="last-update" id="last-update-time">Cargando datos...</div>
+        <button class="refresh-btn" id="btn-refresh" onclick="loadData()">🔄 Sincronizar Ahora</button>
+    </div>
+
+    <div class="grid" id="dashboard-grid">
+        <!-- Las tarjetas se generan dinámicamente vía JS -->
+    </div>
+
+    <script>
+        const grid = document.getElementById('dashboard-grid');
+        const updateTimeLabel = document.getElementById('last-update-time');
+
+        function getProgressColorClass(pct) {
+            if (pct > 50) return 'bg-green';
+            if (pct > 20) return 'bg-yellow';
+            return 'bg-red';
+        }
+
+        function createProgressBar(pct) {
+            const colorClass = getProgressColorClass(pct);
+            return `
+                <div class="progress-container">
+                    <div class="progress-bar ${colorClass}" style="width: ${pct}%"></div>
+                </div>
+            `;
+        }
+
+        function loadData() {
+            updateTimeLabel.innerText = "Sincronizando con los proveedores...";
+            fetch('/api/quota')
+                .then(res => res.json())
+                .then(data => {
+                    renderDashboard(data);
+                })
+                .catch(err => {
+                    grid.innerHTML = `
+                        <div class="card" style="grid-column: 1 / -1; border-color: #f85149;">
+                            <h3 style="color: #f85149; margin-bottom: 10px;">❌ Error de conexión</h3>
+                            <p style="font-size: 14px; margin-bottom: 10px;">No se pudo conectar con el servidor de cuotas.</p>
+                            <code style="background: #21262d; padding: 10px; border-radius: 4px; font-size: 12px;">${err.message}</code>
+                        </div>
+                    `;
+                    updateTimeLabel.innerText = "Error de sincronización.";
+                });
+        }
+
+        function renderDashboard(data) {
+            // Actualizar hora
+            const now = new Date();
+            const agEmail = data.antigravity?.data?.email;
+            updateTimeLabel.innerText = `Última sincronización: ${now.toLocaleTimeString()}${agEmail ? ` | Cuenta: ${agEmail}` : ''}`;
+
+            grid.innerHTML = '';
+
+            // ─── 1. ANTIGRAVITY IDE ───
+            const ag = data.antigravity || {};
+            let agHTML = '';
+            if (ag.status === 'ok') {
+                const groups = ag.data?.groups || [];
+                let modelsHTML = '';
+                
+                if (Array.isArray(groups) && groups.length > 0) {
+                    groups.forEach(group => {
+                        const pct = group.remaining_5h_percent ?? 0;
+                        let resetText = '';
+                        if (group.reset_5h_at) {
+                            const rt = new Date(group.reset_5h_at);
+                            resetText = `<span class="reset-text">Reset 5h: ${rt.toLocaleString()}</span>`;
+                        }
+                        modelsHTML += `
+                            <div class="model-row">
+                                <div class="model-info">
+                                    <span class="model-name">${group.label} <span class="model-badge">${group.model_count} aliases</span></span>
+                                    <span class="model-pct">${pct.toFixed(0)}%</span>
+                                </div>
+                                ${createProgressBar(pct)}
+                                ${resetText}
+                                <span class="reset-text">Semanal: no expuesta por la fuente de solo lectura</span>
+                            </div>
+                        `;
+                    });
+                } else {
+                    modelsHTML = '<p style="font-size: 13px; color: #8b949e;">Conectado. Sin detalles de modelos.</p>';
+                }
+
+                agHTML = `
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-icon">🛸</span>
+                            <span class="card-title">Antigravity IDE</span>
+                            <span class="card-status status-ok">✅ Conectado</span>
+                        </div>
+                        <div class="info-label">Cuota compartida por familia (ventana 5h)</div>
+                        <div class="models-list">${modelsHTML}</div>
+                        <div class="note-box" style="margin-top: 16px;">
+                            La interfaz nativa de AGY muestra una cuota semanal, pero la API de solo lectura disponible no entrega ese porcentaje. No se hacen probes que consuman cuota.
+                        </div>
+                    </div>
+                `;
+            } else {
+                agHTML = `
+                    <div class="card" style="border-color: #f85149;">
+                        <div class="card-header">
+                            <span class="card-icon">🛸</span>
+                            <span class="card-title">Antigravity IDE</span>
+                            <span class="card-status status-error">❌ Desconectado</span>
+                        </div>
+                        <p style="font-size: 13px; color: #f85149; margin-bottom: 12px;">${ag.error || 'Error de autenticación'}</p>
+                        <div class="note-box">${ag.hint || 'Ejecuta <code>antigravity-usage login</code> para autenticar.'}</div>
+                    </div>
+                `;
+            }
+
+            // ─── 2. OPENAI CODEX ───
+            const cx = data.codex || {};
+            let cxHTML = '';
+            if (cx.status === 'ok') {
+                const d = cx.data || {};
+                const accounts = d.accounts?.length ? d.accounts : [d];
+                cxHTML = accounts.map(account => {
+                    const p = account.primary || {};
+                    const s = account.secondary || {};
+                    return `
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-icon">🔵</span>
+                            <span class="card-title">Codex · ${account.label || 'Cuenta'}</span>
+                            <span class="card-status status-ok">✅ ${(account.plan_type || '?').toUpperCase()}</span>
+                        </div>
+                        <div class="info-label">Ventana de Ráfaga (5 Horas)</div>
+                        <div class="model-row" style="margin-bottom: 20px;">
+                            <div class="model-info">
+                                <span class="model-name">Cuota Primaria</span>
+                                <span class="model-pct">${p.remaining_percent}%</span>
+                            </div>
+                            ${createProgressBar(p.remaining_percent)}
+                            <span class="reset-text">↳ Reset: ${p.resets_in}</span>
+                        </div>
+
+                        <div class="info-label">Ventana Semanal (7 Días)</div>
+                        <div class="model-row" style="margin-bottom: 20px;">
+                            <div class="model-info">
+                                <span class="model-name">Cuota Secundaria</span>
+                                <span class="model-pct">${s.remaining_percent}%</span>
+                            </div>
+                            ${createProgressBar(s.remaining_percent)}
+                            <span class="reset-text">↳ Reset: ${s.resets_in}</span>
+                        </div>
+
+                        <div class="note-box">
+                            ${account.email || ''}<br>
+                            Fuente: ${account.source || 'logs locales'}.
+                        </div>
+                    </div>
+                    `;
+                }).join('');
+            } else {
+                cxHTML = `
+                    <div class="card" style="border-color: #bb8009;">
+                        <div class="card-header">
+                            <span class="card-icon">🔵</span>
+                            <span class="card-title">OpenAI Codex</span>
+                            <span class="card-status status-warning">⚠️ No Detectado</span>
+                        </div>
+                        <p style="font-size: 13px; color: #bb8009; margin-bottom: 12px;">${cx.error || 'No hay logs de sesión recientes'}</p>
+                        <div class="note-box">${cx.hint || 'Ejecuta Codex CLI para generar registros de cuota.'}</div>
+                    </div>
+                `;
+            }
+
+            // ─── 3. Z.AI CODING PLAN ───
+            const zai = data.zai || {};
+            let zaiHTML = '';
+            if (zai.status === 'ok') {
+                const d = zai.data || {};
+                let limitsHTML = '';
+                const limits = d.limits || [];
+
+                limits.forEach(lim => {
+                    const pct = lim.remaining_percent ?? (100 - lim.used_percent);
+                    const label = lim.label || lim.type;
+                    
+                    let modelDetailsHTML = '';
+                    if (lim.models) {
+                        modelDetailsHTML = '<div style="margin-top: 6px; padding-left: 8px; border-left: 2px solid #30363d;">';
+                        for (const [mCode, mUsage] of Object.entries(lim.models)) {
+                            if (mUsage > 0) {
+                                modelDetailsHTML += `<div style="font-size: 11px; color: #8b949e; margin-bottom: 2px;">• ${mCode}: ${mUsage}% uso</div>`;
+                            }
+                        }
+                        modelDetailsHTML += '</div>';
+                    }
+
+                    limitsHTML += `
+                        <div class="model-row" style="margin-bottom: 20px;">
+                            <div class="model-info">
+                                <span class="model-name">${label}</span>
+                                <span class="model-pct">${pct.toFixed(0)}%</span>
+                            </div>
+                            ${createProgressBar(pct)}
+                            <span class="reset-text">↳ Reset: ${lim.reset_in}</span>
+                            ${modelDetailsHTML}
+                        </div>
+                    `;
+                });
+
+                zaiHTML = `
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-icon">🧠</span>
+                            <span class="card-title">Z.AI Coding Plan</span>
+                            <span class="card-status status-ok">✅ ${d.level?.toUpperCase()} Plan</span>
+                        </div>
+                        <div class="info-label">Cuota Consumida Real</div>
+                        <div>${limitsHTML}</div>
+                        <div class="note-box" style="margin-top: auto;">
+                            Conectado vía API de monitoreo interna.<br>
+                            Muestra el consumo exacto de tu plan Lite.
+                        </div>
+                    </div>
+                `;
+            } else {
+                zaiHTML = `
+                    <div class="card" style="border-color: #f85149;">
+                        <div class="card-header">
+                            <span class="card-icon">🧠</span>
+                            <span class="card-title">Z.AI Coding Plan</span>
+                            <span class="card-status status-error">❌ Error</span>
+                        </div>
+                        <p style="font-size: 13px; color: #f85149; margin-bottom: 12px;">${zai.error || 'Token de sesión expirado'}</p>
+                        <div class="note-box">${zai.hint || 'Vuelve a iniciar sesión en z.ai y ejecuta <code>extract_zai_cookies.py</code> para refrescar.'}</div>
+                    </div>
+                `;
+            }
+
+            grid.innerHTML = agHTML + cxHTML + zaiHTML;
+        }
+
+        // Carga inicial
+        loadData();
+
+        // Auto-refresh opcional
+        let interval = null;
+        function toggleAutoRefresh() {
+            const checked = document.getElementById('autoRefresh').checked;
+            if (checked) {
+                interval = setInterval(loadData, 5 * 60 * 1000);
+            } else if (interval) {
+                clearInterval(interval);
+            }
+        }
+    </script>
+</body>
+</html>
