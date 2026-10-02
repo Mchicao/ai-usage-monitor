@@ -19,3 +19,5 @@ __pycache__/
 
 # Local test artifacts
 *.png
+# Tool outputs / previews
+.cache/
