@@ -33,6 +33,7 @@ HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/AppData/Local/
 CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
 CODEX_AUTH_FILE = os.path.expanduser("~/.codex/auth.json")
 HERMES_AUTH_FILE = os.path.join(HERMES_HOME, "auth.json")
+OPENCODE_AUTH_FILE = os.path.expanduser("~/.local/share/opencode/auth.json")
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 REFRESH_INTERVAL = 300  # 5 minutos en modo --watch
 QUOTA_SNAPSHOT_FILE = os.environ.get(
@@ -61,6 +62,50 @@ ZAI_PLAN_LIMITS = {
 # ═══════════════════════════════════════════════════════
 
 
+def _parse_agy_usage_output(output: str) -> dict | None:
+    """Convierte la salida oficial de `agy /usage` a grupos de cuota."""
+    groups: dict[str, dict] = {}
+    for line in output.splitlines():
+        fields = [field.strip() for field in line.split("\t")]
+        if len(fields) < 3:
+            continue
+        family_raw, window_raw, remaining_raw = fields[:3]
+        window = window_raw.lower()
+        if "weekly" not in window and "five hour" not in window:
+            continue
+        match = re.search(r"(\d+(?:\.\d+)?)\s*%", remaining_raw)
+        if not match:
+            continue
+        remaining = float(match.group(1))
+        family = "Gemini" if "gemini" in family_raw.lower() else "Claude y GPT"
+        group = groups.setdefault(
+            family,
+            {
+                "label": family,
+                "remaining_5h_percent": None,
+                "reset_5h_at": None,
+                "weekly_remaining_percent": None,
+                "reset_weekly_at": None,
+                "model_count": 0,
+            },
+        )
+        reset_at = fields[3] if len(fields) > 3 and fields[3] else None
+        if "weekly" in window:
+            group["weekly_remaining_percent"] = remaining
+            group["reset_weekly_at"] = reset_at
+        else:
+            group["remaining_5h_percent"] = remaining
+            group["reset_5h_at"] = reset_at
+
+    if not groups:
+        return None
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "method": "agy",
+        "groups": list(groups.values()),
+    }
+
+
 def get_antigravity_quota() -> dict:
     """Obtiene la cuota de Antigravity, conservando el último dato válido."""
     def _load_last_known() -> dict | None:
@@ -68,6 +113,7 @@ def get_antigravity_quota() -> dict:
             with open(AGY_SNAPSHOT_FILE, encoding="utf-8") as handle:
                 cached = json.load(handle)
             if isinstance(cached, dict) and isinstance(cached.get("data"), dict):
+                cached["status"] = "stale"
                 cached["data"]["stale"] = True
                 return cached
         except (OSError, TypeError, json.JSONDecodeError):
@@ -85,9 +131,31 @@ def get_antigravity_quota() -> dict:
 
     try:
         result = subprocess.run(
-            ["antigravity-usage", "quota", "--json"],
+            ["agy", "--print", "/usage"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            shell=True,
+        )
+        if result.returncode == 0:
+            data = _parse_agy_usage_output(result.stdout)
+            if data:
+                data["stale"] = False
+                payload = {"status": "ok", "data": data, "source": "agy /usage"}
+                _save_last_known(payload)
+                return payload
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass
+
+    try:
+        result = subprocess.run(
+            ["antigravity-usage", "quota", "--json", "--refresh"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             shell=True,
         )
@@ -96,6 +164,7 @@ def get_antigravity_quota() -> dict:
                 data = json.loads(result.stdout)
                 if isinstance(data.get("models"), list):
                     data["groups"] = _normalise_antigravity_groups(data["models"])
+                data["stale"] = False
                 payload = {
                     "status": "ok",
                     "data": data,
@@ -140,9 +209,17 @@ def _normalise_antigravity_groups(models: list[dict]) -> list[dict]:
     """Colapsa aliases que comparten la misma ventana 5h; weekly no viene en esta API."""
     groups = {}
     for model in models:
-        remaining = model.get("remainingPercentage")
+        raw_remaining = model.get("remainingPercentage")
         reset_at = model.get("resetTime")
-        if remaining is None:
+        if raw_remaining is None:
+            continue
+        try:
+            remaining = float(raw_remaining)
+        except (TypeError, ValueError):
+            continue
+        if remaining > 1:
+            remaining /= 100
+        if not 0 <= remaining <= 1:
             continue
         label = str(model.get("label") or model.get("modelId") or "")
         family = "Gemini" if "gemini" in label.lower() else "Claude y GPT"
@@ -184,8 +261,33 @@ def _local_zai_email() -> str | None:
         return None
 
 
+def _token_is_expired(token: str) -> bool:
+    try:
+        exp = _jwt_claims(token).get("exp")
+    except (ValueError, IndexError, KeyError, json.JSONDecodeError):
+        return True
+    return isinstance(exp, (int, float)) and exp <= time.time()
+
+
+def _dedupe_credentials(candidates: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
+    """Deduplica por chatgpt_account_id; ante la misma cuenta prefiere el token vigente."""
+    credentials: dict[str, tuple[str, str, bool]] = {}
+    for label, token in candidates:
+        try:
+            openai_auth = _jwt_claims(token).get("https://api.openai.com/auth") or {}
+            account_id = openai_auth.get("chatgpt_account_id")
+        except (ValueError, IndexError, KeyError, json.JSONDecodeError):
+            continue
+        if not account_id:
+            continue
+        expired = _token_is_expired(token)
+        if account_id not in credentials or (credentials[account_id][2] and not expired):
+            credentials[account_id] = (label, token, expired)
+    return [(label, token, account_id) for account_id, (label, token, _exp) in credentials.items()]
+
+
 def _codex_credentials() -> list[tuple[str, str, str]]:
-    """Descubre las cuentas OAuth ya gestionadas por Codex y Hermes."""
+    """Descubre las cuentas OAuth ya gestionadas por Codex, Hermes y OpenCode."""
     candidates = []
     try:
         with open(CODEX_AUTH_FILE, encoding="utf-8") as f:
@@ -204,19 +306,16 @@ def _codex_credentials() -> list[tuple[str, str, str]]:
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
         pass
 
-    credentials = []
-    seen = set()
-    for label, token in candidates:
-        try:
-            claims = _jwt_claims(token)
-            openai_auth = claims.get("https://api.openai.com/auth") or {}
-            account_id = openai_auth.get("chatgpt_account_id")
-            if account_id and account_id not in seen:
-                seen.add(account_id)
-                credentials.append((label, token, account_id))
-        except (ValueError, IndexError, KeyError, json.JSONDecodeError):
-            continue
-    return credentials
+    try:
+        with open(OPENCODE_AUTH_FILE, encoding="utf-8") as f:
+            provider = json.load(f).get("openai") or {}
+        token = provider.get("access")
+        if token:
+            candidates.append(("OpenCode", token))
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        pass
+
+    return _dedupe_credentials(candidates)
 
 
 def _normalise_codex_window(window: dict, default_seconds: int) -> dict:
@@ -232,6 +331,48 @@ def _normalise_codex_window(window: dict, default_seconds: int) -> dict:
         "resets_at_iso": _ts_to_iso(reset_at),
         "resets_in": _ts_to_countdown(reset_at),
     }
+
+
+def codex_windows_with_data(account: dict) -> list[tuple[str, dict]]:
+    """Ventanas de cuota con datos reales, etiquetadas por su duración.
+
+    La API de uso cambió de forma: hoy `primary_window` puede ser la ventana
+    semanal (604800s) con `secondary_window` en null, así que no se asume
+    la duración por posición (primary/secondary) sino por window_hours.
+    """
+    fallbacks = {"primary": "5h", "secondary": "7d"}
+    windows = []
+    for slot in ("primary", "secondary"):
+        window = account.get(slot) or {}
+        if window.get("remaining_percent") is None:
+            continue
+        windows.append((_codex_window_label(_codex_window_hours(window), fallbacks[slot]), window))
+    return windows
+
+
+def _codex_window_hours(window: dict) -> float | None:
+    """Duración real de la ventana en horas; None si la fuente no la expone."""
+    hours = window.get("window_hours")
+    if hours is None:
+        days = window.get("window_days")
+        hours = days * 24 if days is not None else None
+    return hours
+
+
+def _codex_window_label(hours: float | None, fallback: str) -> str:
+    if hours is None:
+        return fallback
+    if hours <= 5:
+        return "5h"
+    if hours >= 168:
+        return "7d"
+    return f"{hours:.0f}h"
+
+
+def _codex_min_remaining(account: dict) -> float:
+    """Restante mínimo entre ventanas expuestas; inf si no hay datos."""
+    pcts = [window["remaining_percent"] for _, window in codex_windows_with_data(account)]
+    return min(pcts) if pcts else float("inf")
 
 
 def _fetch_codex_account(label: str, token: str, account_id: str) -> dict:
@@ -276,8 +417,8 @@ def get_codex_quota() -> dict:
             fallback["error"] = "; ".join(errors)
         return fallback
 
-    # Compatibilidad: consumidores antiguos ven la cuenta con menor cuota primaria.
-    summary = min(accounts, key=lambda account: account["primary"]["remaining_percent"])
+    # Compatibilidad: consumidores antiguos ven la cuenta con menor cuota expuesta.
+    summary = min(accounts, key=_codex_min_remaining)
     return {"status": "ok", "data": {**summary, "accounts": accounts}}
 
 
@@ -593,13 +734,15 @@ def render_terminal(all_data: dict) -> str:
         for account in data.get("accounts") or [data]:
             label = account.get("label", "Codex")
             plan = account.get("plan_type", "?")
-            p = account.get("primary", {})
-            s = account.get("secondary", {})
             lines.append(f"  │ 📋 {label:<8} ChatGPT {plan.upper():<10}                         │")
-            lines.append(
-                f"  │    5h: {p.get('remaining_percent', 0):>5.1f}% ({p.get('resets_in', '?')})"
-                f" · 7d: {s.get('remaining_percent', 0):>5.1f}% ({s.get('resets_in', '?')})"
-            )
+            windows = codex_windows_with_data(account)
+            if not windows:
+                lines.append("  │    Sin ventanas de cuota expuestas por la API")
+            for window_name, window in windows:
+                remaining = window.get("remaining_percent", 0)
+                lines.append(
+                    f"  │    {window_name}: {remaining:>5.1f}% ({window.get('resets_in', '?')})"
+                )
 
     elif cx.get("status") == "error":
         err = cx.get("error", "Error")[:55]
@@ -671,14 +814,11 @@ def build_quota_snapshot(all_data: dict) -> dict:
         data = codex["data"]
         for account in data.get("accounts") or [data]:
             label = account.get("label", "Codex")
-            windows = {
-                name: window.get("remaining_percent")
-                for name, window in (
-                    ("5h", account.get("primary") or {}),
-                    ("7d", account.get("secondary") or {}),
-                )
-                if window.get("remaining_percent") is not None
-            }
+            windows = {}
+            for window_name, window in codex_windows_with_data(account):
+                remaining = window["remaining_percent"]
+                if window_name not in windows or remaining < windows[window_name]:
+                    windows[window_name] = remaining
             if windows:
                 providers[f"codex:{label}"] = {"windows": windows}
 
@@ -696,11 +836,13 @@ def build_quota_snapshot(all_data: dict) -> dict:
         family_minimums = {}
         for group in antigravity["data"].get("groups", []):
             key = "gemini" if group.get("label") == "Gemini" else "claude_gpt"
-            remaining = group.get("remaining_5h_percent")
-            if remaining is not None:
-                family_minimums[key] = min(remaining, family_minimums.get(key, remaining))
-        for key, remaining in family_minimums.items():
-            providers[f"agy:{key}"] = {"windows": {"5h": remaining}}
+            windows = family_minimums.setdefault(key, {})
+            for window_name, field in (("5h", "remaining_5h_percent"), ("7d", "weekly_remaining_percent")):
+                remaining = group.get(field)
+                if remaining is not None:
+                    windows[window_name] = min(remaining, windows.get(window_name, remaining))
+        for key, windows in family_minimums.items():
+            providers[f"agy:{key}"] = {"windows": windows}
 
     return {
         "version": 1,

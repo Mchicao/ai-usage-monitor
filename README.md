@@ -6,16 +6,15 @@ Monitoreo en tiempo real del uso restante de tus planes de IA.
 
 | Proveedor | Método | ¿Cuota restante? | Estado |
 |---|---|---|---|
-| **Google Antigravity IDE** | API Google Cloud Code (`cloudcode-pa.googleapis.com`) | ✅ `remainingFraction` por modelo | Requiere `antigravity-usage login` (1 vez) |
+| **Google Antigravity IDE** | CLI oficial `agy --print "/usage"` | ✅ cuotas semanal/5h por familia | Requiere login OAuth de `agy` |
 | **OpenAI Codex ×2** | API de uso con OAuth local de Codex y Hermes | ✅ `used_percent` ventanas 5h/7d por cuenta | ✅ Descubrimiento automático |
 | **Z.AI Coding Plan** | Probe HTTP + detección de 429 | ⚠️ Solo disponible/no disponible + límites teóricos | ✅ Funciona sin configuración |
 
 ## Instalación rápida
 
 ```bash
-# 1. Antigravity CLI (opcional, para cuota de Antigravity)
-npm install -g antigravity-usage
-antigravity-usage login  # una sola vez
+# 1. Login OAuth de Antigravity (una sola vez)
+agy --print "/usage"
 
 # 2. CodeZeno — widget nativo en taskbar de Windows
 winget install CodeZeno.ClaudeCodeUsageMonitor
@@ -50,16 +49,16 @@ Se inicia automáticamente con Windows. Muestra barras en la taskbar para Claude
 ## Detalles técnicos
 
 ### Antigravity IDE
-- **API**: `https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
-- **Auth**: OAuth 2.0 de Google (vía `antigravity-usage login`)
-- **Datos**: `remainingFraction` (0.0–1.0) + `resetTime` por modelo
-- **Reset**: Cada ~5 horas por modelo (ventana deslizante)
+- **Fuente**: `agy --print "/usage"`, que expone cuotas separadas por familia y ventana
+- **Auth**: OAuth 2.0 de Google gestionado por `agy`
+- **Datos**: cuota semanal y de 5 horas para Gemini y Claude/GPT
+- **Fallback**: `antigravity-usage quota --refresh`; si falla, el último snapshot se marca como desactualizado y no se presenta como cuota actual
 
 ### OpenAI Codex
-- **Fuentes OAuth**: `~/.codex/auth.json` y `%LOCALAPPDATA%/hermes/auth.json`
+- **Fuentes OAuth**: `~/.codex/auth.json`, `%LOCALAPPDATA%/hermes/auth.json` y `~/.local/share/opencode/auth.json`
 - **API**: consulta de uso autenticada; los tokens sólo se leen en memoria
-- **Multi-cuenta**: deduplica por `chatgpt_account_id` y muestra Codex y Hermes por separado
-- **Datos**: `used_percent` para ventanas `primary` (5h) y `secondary` (7d)
+- **Multi-cuenta**: deduplica por `chatgpt_account_id`; ante la misma cuenta prefiere el token vigente (si el cacheado de un tool expira, usa el de otro tool que siga vivo)
+- **Datos**: `used_percent` por ventana (5h/7d). La API cambió de forma: puede exponer solo la semanal como `primary` con `secondary` en null — las ventanas se etiquetan por su duración real (`window_hours`), no por posición
 - **También**: `plan_type` (Plus/Pro) y `credits`
 - **Fallback**: usa `~/.codex/sessions/**/*.jsonl` si la API no está disponible
 

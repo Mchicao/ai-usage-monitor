@@ -297,27 +297,38 @@
             // ─── 1. ANTIGRAVITY IDE ───
             const ag = data.antigravity || {};
             let agHTML = '';
-            if (ag.status === 'ok') {
+            if (ag.status === 'ok' || ag.status === 'stale') {
+                const isStale = ag.status === 'stale' || ag.data?.stale === true;
+                const staleReason = ag.error || ag.data?.stale_error || 'el CLI no encontró una sesión activa';
                 const groups = ag.data?.groups || [];
                 let modelsHTML = '';
                 
                 if (Array.isArray(groups) && groups.length > 0) {
                     groups.forEach(group => {
                         const pct = group.remaining_5h_percent ?? 0;
+                        const weekly = group.weekly_remaining_percent;
+                        const pctHTML = isStale ? '—' : `${pct.toFixed(0)}%`;
+                        const lastKnownHTML = isStale
+                            ? `<span class="reset-text">Último dato conocido: ${pct.toFixed(0)}%</span>`
+                            : '';
                         let resetText = '';
                         if (group.reset_5h_at) {
                             const rt = new Date(group.reset_5h_at);
                             resetText = `<span class="reset-text">Reset 5h: ${rt.toLocaleString()}</span>`;
                         }
+                        const weeklyText = weekly == null
+                            ? 'Semanal: no expuesta por la fuente de solo lectura'
+                            : `Semanal: ${weekly.toFixed(0)}%${group.reset_weekly_at ? ` · reset ${new Date(group.reset_weekly_at).toLocaleString()}` : ''}`;
                         modelsHTML += `
                             <div class="model-row">
                                 <div class="model-info">
                                     <span class="model-name">${group.label} <span class="model-badge">${group.model_count} aliases</span></span>
-                                    <span class="model-pct">${pct.toFixed(0)}%</span>
+                                    <span class="model-pct">${pctHTML}</span>
                                 </div>
-                                ${createProgressBar(pct)}
+                                ${isStale ? '<div class="progress-track"><div class="progress-fill" style="width: 0%; background: #8b949e;"></div></div>' : createProgressBar(pct)}
                                 ${resetText}
-                                <span class="reset-text">Semanal: no expuesta por la fuente de solo lectura</span>
+                                ${lastKnownHTML}
+                                <span class="reset-text">${weeklyText}</span>
                             </div>
                         `;
                     });
@@ -330,12 +341,14 @@
                         <div class="card-header">
                             <span class="card-icon">🛸</span>
                             <span class="card-title">Antigravity IDE</span>
-                            <span class="card-status status-ok">✅ Conectado</span>
+                            <span class="card-status ${isStale ? 'status-warning' : 'status-ok'}">${isStale ? '⚠️ Desactualizado' : '✅ Conectado'}</span>
                         </div>
-                        <div class="info-label">Cuota compartida por familia (ventana 5h)</div>
+                        <div class="info-label">${isStale ? 'Último dato conocido — no representa la cuota actual' : 'Cuota compartida por familia (ventana 5h)'}</div>
                         <div class="models-list">${modelsHTML}</div>
                         <div class="note-box" style="margin-top: 16px;">
-                            La interfaz nativa de AGY muestra una cuota semanal, pero la API de solo lectura disponible no entrega ese porcentaje. No se hacen probes que consuman cuota.
+                            ${isStale
+                                ? `No se pudo actualizar Antigravity: ${staleReason}. Se oculta el porcentaje como dato actual; el valor mostrado arriba es sólo el último dato conocido (${ag.data?.timestamp || 'fecha no disponible'}).`
+                                : 'La interfaz nativa de AGY muestra una cuota semanal, pero la API de solo lectura disponible no entrega ese porcentaje. No se hacen probes que consuman cuota.'}
                         </div>
                     </div>
                 `;
@@ -360,8 +373,34 @@
                 const d = cx.data || {};
                 const accounts = d.accounts?.length ? d.accounts : [d];
                 cxHTML = accounts.map(account => {
-                    const p = account.primary || {};
-                    const s = account.secondary || {};
+                    // La API puede exponer solo la ventana semanal (secondary en null):
+                    // se etiqueta cada ventana por su duración real y se omiten las vacías.
+                    const winLabel = w => {
+                        const h = w.window_hours ?? (w.window_days != null ? w.window_days * 24 : null);
+                        if (h == null) return null;
+                        if (h <= 5) return '5h';
+                        if (h >= 168) return '7d';
+                        return `${Math.round(h)}h`;
+                    };
+                    const winTitles = { '5h': 'Ventana de Ráfaga (5 Horas)', '7d': 'Ventana Semanal (7 Días)' };
+                    const windows = ['primary', 'secondary']
+                        .map(k => account[k] || {})
+                        .filter(w => w.remaining_percent !== null && w.remaining_percent !== undefined);
+                    const rowsHTML = windows.map(w => {
+                        const lbl = winLabel(w);
+                        return `
+                        <div class="info-label">${winTitles[lbl] || `Ventana ${lbl || '?'}`}</div>
+                        <div class="model-row" style="margin-bottom: 20px;">
+                            <div class="model-info">
+                                <span class="model-name">Cuota ${lbl || ''}</span>
+                                <span class="model-pct">${w.remaining_percent}%</span>
+                            </div>
+                            ${createProgressBar(w.remaining_percent)}
+                            <span class="reset-text">↳ Reset: ${w.resets_in}</span>
+                        </div>`;
+                    }).join('');
+                    const windowsHTML = rowsHTML ||
+                        '<div class="note-box">La API no expone ventanas de cuota en este momento.</div>';
                     return `
                     <div class="card">
                         <div class="card-header">
@@ -369,25 +408,7 @@
                             <span class="card-title">Codex · ${account.label || 'Cuenta'}</span>
                             <span class="card-status status-ok">✅ ${(account.plan_type || '?').toUpperCase()}</span>
                         </div>
-                        <div class="info-label">Ventana de Ráfaga (5 Horas)</div>
-                        <div class="model-row" style="margin-bottom: 20px;">
-                            <div class="model-info">
-                                <span class="model-name">Cuota Primaria</span>
-                                <span class="model-pct">${p.remaining_percent}%</span>
-                            </div>
-                            ${createProgressBar(p.remaining_percent)}
-                            <span class="reset-text">↳ Reset: ${p.resets_in}</span>
-                        </div>
-
-                        <div class="info-label">Ventana Semanal (7 Días)</div>
-                        <div class="model-row" style="margin-bottom: 20px;">
-                            <div class="model-info">
-                                <span class="model-name">Cuota Secundaria</span>
-                                <span class="model-pct">${s.remaining_percent}%</span>
-                            </div>
-                            ${createProgressBar(s.remaining_percent)}
-                            <span class="reset-text">↳ Reset: ${s.resets_in}</span>
-                        </div>
+                        ${windowsHTML}
 
                         <div class="note-box">
                             ${account.email || ''}<br>
