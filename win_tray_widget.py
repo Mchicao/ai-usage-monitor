@@ -21,7 +21,7 @@ import time
 
 import customtkinter as ctk
 import pystray
-from ai_quota_widget import codex_windows_with_data, collect_all_quotas
+from ai_quota_widget import _ts_to_countdown, codex_windows_with_data, collect_all_quotas
 from PIL import Image, ImageDraw
 
 # ─── Configuración ───
@@ -89,6 +89,8 @@ def create_icon_image(data: dict) -> Image.Image:
         pcts = []
         for group in groups:
             val = group.get("remaining_5h_percent")
+            if not isinstance(val, (int, float)):
+                val = group.get("weekly_remaining_percent")
             if isinstance(val, (int, float)):
                 pcts.append(val)
         if pcts:
@@ -124,15 +126,23 @@ def get_compact_tooltip(data: dict) -> str:
     ag_t = "AG:N/A"
     cx_t = "CX:N/A"
     zi_t = "ZI:N/A"
-    if data.get("antigravity", {}).get("status") == "ok":
-        groups = data["antigravity"]["data"].get("groups", [])
+    if data.get("antigravity", {}).get("status") in ("ok", "stale"):
+        groups = data["antigravity"].get("data", {}).get("groups", [])
         pcts = []
         for group in groups:
             val = group.get("remaining_5h_percent")
+            if not isinstance(val, (int, float)):
+                val = group.get("weekly_remaining_percent")
             if isinstance(val, (int, float)):
-                pcts.append(val)
+                pcts.append((val, group))
         if pcts:
-            ag_t = f"🛸AG:{min(pcts):.0f}%"
+            min_val, min_group = min(pcts, key=lambda x: x[0])
+            window = "5h" if isinstance(min_group.get("remaining_5h_percent"), (int, float)) else "weekly"
+            r5h = min_group.get(f"reset_{window}_in") or _ts_to_countdown(min_group.get(f"reset_{window}_at"))
+            if r5h and r5h not in ("N/A", "Ya reseteado"):
+                ag_t = f"🛸AG:{min_val:.0f}%({r5h})"
+            else:
+                ag_t = f"🛸AG:{min_val:.0f}%"
     if data.get("codex", {}).get("status") == "ok":
         accounts = data["codex"]["data"].get("accounts") or [data["codex"]["data"]]
         parts = []
@@ -167,18 +177,6 @@ class FluentPopup(ctk.CTkToplevel):
         self.attributes("-topmost", True)
         self.configure(fg_color=BG_MAIN)
 
-        # Dimensiones y posición (esquina inferior derecha del área de trabajo).
-        # La altura debe incluir todas las tarjetas activas: un alto fijo de 480px
-        # cortaba Z.AI y el footer cuando había varios modelos/cuentas.
-        w = 340
-        cx_count = len(self._get_cx_accounts())
-        card_count = (
-            len(self._get_ag_groups()) + cx_count + (1 if self._get_zi_data() else 0)
-        )
-        # Cada tarjeta Codex lleva una fila por ventana (5h/7d) con % grande → más alta.
-        h = max(480, 140 + card_count * 90 + cx_count * 34)
-        # Usar el área de trabajo real (excluye la barra de tareas) vía Win32,
-        # en lugar de winfo_screenheight() que devuelve el alto físico total.
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         try:
@@ -202,18 +200,30 @@ class FluentPopup(ctk.CTkToplevel):
                     sw, sh = wa_w, wa_h
         except (OSError, AttributeError):
             pass  # fallback a screenwidth/screenheight si Win32 falla
-        x = sw - w - 20
-        y = sh - h - 12  # 12px de margen inferior sobre el área de trabajo
-        self.geometry(f"{w}x{h}+{x}+{y}")
+
+        self._screen_width = sw
+        self._screen_height = sh
+        self._build_ui()
+        self._fit_to_content()
 
         # Light dismiss
         self.after(200, lambda: self.bind("<FocusOut>", lambda _event: close_popup()))
         self.bind("<Escape>", lambda _event: close_popup())
 
-        self._build_ui()
-
         # Forzar foco
         self.focus_force()
+
+    def _fit_to_content(self):
+        self.update_idletasks()
+        height = max(420, min(self.winfo_reqheight(), self._screen_height - 40))
+        self.geometry(f"350x{height}+{self._screen_width - 370}+{self._screen_height - height - 12}")
+
+    def update_data(self, data: dict):
+        self.data = data
+        for child in self.winfo_children():
+            child.destroy()
+        self._build_ui()
+        self._fit_to_content()
 
     def _build_ui(self):
         # Padding del frame principal
@@ -247,7 +257,7 @@ class FluentPopup(ctk.CTkToplevel):
 
         # ─── Cards de cada proveedor ───
         card_frame = ctk.CTkFrame(self, fg_color="transparent")
-        card_frame.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="nsew")
+        card_frame.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="nsew")
         card_frame.grid_columnconfigure(0, weight=1)
 
         # 1. Antigravity (aliases colapsados por familia/cuota compartida)
@@ -261,22 +271,6 @@ class FluentPopup(ctk.CTkToplevel):
             row += 1
         # 3. Z.AI
         self._add_provider_card(card_frame, row, "🧠", "Z.AI Coding Plan", self._get_zi_data())
-
-        # ─── Footer ───
-        footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="ew")
-
-        web_btn = ctk.CTkButton(
-            footer,
-            text="🌐 Abrir Dashboard Web",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            fg_color=ACCENT,
-            hover_color="#106ebe",
-            height=32,
-            corner_radius=6,
-            command=self._open_web,
-        )
-        web_btn.pack(fill="x")
 
     def _add_provider_card(self, parent, row, icon, title, info):
         """Agrega una tarjeta de proveedor con barra de progreso."""
@@ -332,6 +326,8 @@ class FluentPopup(ctk.CTkToplevel):
                 font=ctk.CTkFont(family="Segoe UI", size=10),
                 text_color=TEXT_MUTED,
                 anchor="w",
+                justify="left",
+                wraplength=310,
             )
             sub_lbl.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="w")
 
@@ -357,9 +353,13 @@ class FluentPopup(ctk.CTkToplevel):
             pct = five_hour if isinstance(five_hour, (int, float)) else weekly
             windows = []
             if isinstance(five_hour, (int, float)):
-                windows.append(f"5h {five_hour:.0f}%")
+                r5h = group.get("reset_5h_in") or _ts_to_countdown(group.get("reset_5h_at"))
+                reset_text = f" (Reset: {r5h})" if r5h and r5h != "N/A" else ""
+                windows.append(f"5h {five_hour:.0f}%{reset_text}")
             if isinstance(weekly, (int, float)):
-                windows.append(f"7d {weekly:.0f}%")
+                rw = group.get("reset_weekly_in") or _ts_to_countdown(group.get("reset_weekly_at"))
+                reset_text = f" (Reset: {rw})" if rw and rw != "N/A" else ""
+                windows.append(f"7d {weekly:.0f}%{reset_text}")
             results.append(
                 (
                     group.get("label", "Modelos"),
@@ -373,7 +373,7 @@ class FluentPopup(ctk.CTkToplevel):
 
     def _get_cx_accounts(self):
         d = self.data.get("codex", {})
-        if d.get("status") != "ok":
+        if d.get("status") not in ("ok", "error") or not d.get("data"):
             return []
         accounts = d["data"].get("accounts") or [d["data"]]
         results = []
@@ -391,9 +391,31 @@ class FluentPopup(ctk.CTkToplevel):
                 )
                 subtitle = f"{plan} · {resets}"
             else:
-                subtitle = f"{plan} · sin ventanas expuestas"
+                subtitle = f"Cuota no disponible · {account['error']}" if account.get("status") == "error" else f"{plan} · sin ventanas expuestas"
+
+            # Resets manuales de cuota (rate limit reset credits)
+            reset_credits = account.get("reset_credits") or {}
+            avail = reset_credits.get("available_count", 0)
+            summary = reset_credits.get("summary")
+            if avail > 0 and summary:
+                resets_text = f"🔄 {avail} resets: {summary}"
+            elif avail > 0:
+                resets_text = f"🔄 {avail} resets disponibles"
+            else:
+                resets_text = "🔄 Sin resets disponibles"
+            if account.get("status") == "error":
+                resets_text = ""
+
             results.append(
-                (f"Codex · {account.get('label', 'Cuenta')}", {"windows": windows, "subtitle": subtitle})
+                (
+                    f"Codex · {account.get('label', 'Cuenta')}",
+                    {
+                        "windows": windows,
+                        "subtitle": subtitle,
+                        "resets_text": resets_text,
+                        "resets_count": avail,
+                    },
+                )
             )
         return results
 
@@ -459,7 +481,22 @@ class FluentPopup(ctk.CTkToplevel):
                 text_color=TEXT_MUTED,
                 anchor="w",
             )
-            sub_lbl.grid(row=1 + len(windows), column=0, padx=12, pady=(2, 8), sticky="w")
+            sub_lbl.grid(row=1 + len(windows), column=0, padx=12, pady=(2, 2), sticky="w")
+
+        resets_text = info.get("resets_text", "")
+        if resets_text:
+            resets_count = info.get("resets_count", 0)
+            color = "#58a6ff" if resets_count > 0 else TEXT_MUTED
+            resets_lbl = ctk.CTkLabel(
+                card,
+                text=resets_text,
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                text_color=color,
+                anchor="w",
+                justify="left",
+                wraplength=310,
+            )
+            resets_lbl.grid(row=2 + len(windows), column=0, padx=12, pady=(0, 8), sticky="w")
 
     def _get_zi_data(self):
         d = self.data.get("zai", {})
@@ -490,7 +527,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/api/show") or self.path.startswith("/popup"):
-            show_popup()
+            open_popup_window()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", "2")
@@ -546,6 +583,20 @@ def close_popup():
             pass
 
 
+def _open_popup():
+    global popup_window
+    if popup_window and popup_window.winfo_exists():
+        popup_window.lift()
+        popup_window.focus_force()
+        return
+    popup_window = FluentPopup(latest_data.copy())
+
+
+def open_popup_window():
+    if tk_root:
+        tk_root.after(0, _open_popup)
+
+
 def _toggle_popup():
     global popup_window
     if popup_window and popup_window.winfo_exists():
@@ -559,10 +610,20 @@ def show_popup(_icon=None, _item=None):
         tk_root.after(0, _toggle_popup)
 
 
+def refresh_open_popup():
+    if popup_window and popup_window.winfo_exists():
+        popup_window.update_data(latest_data.copy())
+
+
 def refresh_loop(icon):
     global latest_data
     while True:
         latest_data = fetch_quota_data()
+        if tk_root:
+            try:
+                tk_root.after(0, refresh_open_popup)
+            except RuntimeError:
+                pass
         if icon and latest_data:
             try:
                 icon.icon = create_icon_image(latest_data)
@@ -607,6 +668,7 @@ def main():
     latest_data = fetch_quota_data()
     tk_root = ctk.CTk()
     tk_root.withdraw()
+    ensure_dashboard_server()
 
     tray_icon = pystray.Icon(
         "ai_usage_monitor",
@@ -623,7 +685,7 @@ def main():
     threading.Thread(target=refresh_loop, args=(tray_icon,), daemon=True).start()
     tray_icon.run_detached()
     if "--popup" in sys.argv or "--show" in sys.argv:
-        tk_root.after(300, show_popup)
+        tk_root.after(300, open_popup_window)
     try:
         tk_root.mainloop()
     finally:
@@ -631,4 +693,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        with open(os.path.join(SCRIPT_DIR, "crash.log"), "w", encoding="utf-8") as f:
+            traceback.print_exc(file=f)

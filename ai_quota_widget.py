@@ -35,6 +35,7 @@ CODEX_AUTH_FILE = os.path.expanduser("~/.codex/auth.json")
 HERMES_AUTH_FILE = os.path.join(HERMES_HOME, "auth.json")
 OPENCODE_AUTH_FILE = os.path.expanduser("~/.local/share/opencode/auth.json")
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 REFRESH_INTERVAL = 300  # 5 minutos en modo --watch
 QUOTA_SNAPSHOT_FILE = os.environ.get(
     "AI_QUOTA_SNAPSHOT_FILE", os.path.join(os.path.dirname(__file__), "quota_snapshot.json")
@@ -47,6 +48,7 @@ AGY_SNAPSHOT_FILE = os.environ.get(
     "AI_AGY_SNAPSHOT_FILE",
     os.path.join(os.path.dirname(__file__), "agy_quota_snapshot.json"),
 )
+AGY_FAMILY_KEYS = {"Gemini": "gemini", "Claude y GPT": "claude_gpt", "Gemini 4 Argon": "gemini_argon"}
 
 # Límites conocidos del Z.AI Coding Plan (extraídos de la documentación oficial)
 # https://docs.z.ai/coding-plan/overview
@@ -58,8 +60,84 @@ ZAI_PLAN_LIMITS = {
 
 
 # ═══════════════════════════════════════════════════════
+def _ts_to_iso(ts) -> str | None:
+    """Convierte timestamp Unix o ISO a ISO string."""
+    if not ts:
+        return None
+    if isinstance(ts, str):
+        return ts
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()  # noqa: UP017
+    except Exception:
+        return str(ts)
+
+
+def _ts_to_countdown(ts) -> str:
+    """Convierte timestamp Unix o cadena ISO 8601 a countdown legible (ej: '3h 42m')."""
+    if not ts:
+        return "N/A"
+    try:
+        now = datetime.now(tz=timezone.utc)  # noqa: UP017
+        if isinstance(ts, (int, float)):
+            reset = datetime.fromtimestamp(ts, tz=timezone.utc)  # noqa: UP017
+        elif isinstance(ts, str):
+            clean_ts = ts.strip().replace("Z", "+00:00")
+            reset = datetime.fromisoformat(clean_ts)
+            if reset.tzinfo is None:
+                reset = reset.replace(tzinfo=timezone.utc)
+        elif isinstance(ts, datetime):
+            reset = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        else:
+            return "N/A"
+
+        diff = reset - now
+        total_secs = diff.total_seconds()
+        if total_secs <= 0:
+            return "Ya reseteado"
+        hours = int(total_secs // 3600)
+        mins = int((total_secs % 3600) // 60)
+        if hours >= 24:
+            days = hours // 24
+            hours = hours % 24
+            return f"{days}d {hours}h"
+        return f"{hours}h {mins}m"
+    except Exception:
+        return "N/A"
+
+
 #  1. ANTIGRAVITY IDE
 # ═══════════════════════════════════════════════════════
+
+
+def _antigravity_family(label: str) -> str:
+    name = label.lower()
+    if "argon" in name:
+        return "Gemini 4 Argon"
+    if "gemini" in name:
+        return "Gemini"
+    if "claude" in name or "gpt" in name:
+        return "Claude y GPT"
+    return label.strip()
+
+
+def _run_quota_command(command: list[str], *, shell: bool = False) -> subprocess.CompletedProcess:
+    startup = None
+    if sys.platform == "win32":
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        stdin=subprocess.DEVNULL,
+        shell=shell,
+        startupinfo=startup,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
 
 
 def _parse_agy_usage_output(output: str) -> dict | None:
@@ -77,15 +155,17 @@ def _parse_agy_usage_output(output: str) -> dict | None:
         if not match:
             continue
         remaining = float(match.group(1))
-        family = "Gemini" if "gemini" in family_raw.lower() else "Claude y GPT"
+        family = _antigravity_family(family_raw)
         group = groups.setdefault(
             family,
             {
                 "label": family,
                 "remaining_5h_percent": None,
                 "reset_5h_at": None,
+                "reset_5h_in": None,
                 "weekly_remaining_percent": None,
                 "reset_weekly_at": None,
+                "reset_weekly_in": None,
                 "model_count": 0,
             },
         )
@@ -93,9 +173,11 @@ def _parse_agy_usage_output(output: str) -> dict | None:
         if "weekly" in window:
             group["weekly_remaining_percent"] = remaining
             group["reset_weekly_at"] = reset_at
+            group["reset_weekly_in"] = _ts_to_countdown(reset_at)
         else:
             group["remaining_5h_percent"] = remaining
             group["reset_5h_at"] = reset_at
+            group["reset_5h_in"] = _ts_to_countdown(reset_at)
 
     if not groups:
         return None
@@ -115,6 +197,11 @@ def get_antigravity_quota() -> dict:
             if isinstance(cached, dict) and isinstance(cached.get("data"), dict):
                 cached["status"] = "stale"
                 cached["data"]["stale"] = True
+                for g in cached["data"].get("groups", []):
+                    if g.get("reset_5h_at"):
+                        g["reset_5h_in"] = _ts_to_countdown(g["reset_5h_at"])
+                    if g.get("reset_weekly_at"):
+                        g["reset_weekly_in"] = _ts_to_countdown(g["reset_weekly_at"])
                 return cached
         except (OSError, TypeError, json.JSONDecodeError):
             return None
@@ -130,14 +217,8 @@ def get_antigravity_quota() -> dict:
             pass
 
     try:
-        result = subprocess.run(
+        result = _run_quota_command(
             ["agy", "--print", "/usage"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            shell=True,
         )
         if result.returncode == 0:
             data = _parse_agy_usage_output(result.stdout)
@@ -149,14 +230,13 @@ def get_antigravity_quota() -> dict:
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         pass
 
+    cached = _load_last_known()
+    if cached and cached["data"].get("method") == "agy":
+        return cached
+
     try:
-        result = subprocess.run(
+        result = _run_quota_command(
             ["antigravity-usage", "quota", "--json", "--refresh"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
             shell=True,
         )
         if result.returncode == 0:
@@ -222,7 +302,7 @@ def _normalise_antigravity_groups(models: list[dict]) -> list[dict]:
         if not 0 <= remaining <= 1:
             continue
         label = str(model.get("label") or model.get("modelId") or "")
-        family = "Gemini" if "gemini" in label.lower() else "Claude y GPT"
+        family = _antigravity_family(label)
         key = (family, round(float(remaining), 6), reset_at)
         groups.setdefault(
             key,
@@ -230,7 +310,10 @@ def _normalise_antigravity_groups(models: list[dict]) -> list[dict]:
                 "label": family,
                 "remaining_5h_percent": round(float(remaining) * 100, 1),
                 "reset_5h_at": reset_at,
+                "reset_5h_in": _ts_to_countdown(reset_at),
                 "weekly_remaining_percent": None,
+                "reset_weekly_at": None,
+                "reset_weekly_in": None,
                 "model_count": 0,
             },
         )["model_count"] += 1
@@ -307,6 +390,22 @@ def _codex_credentials() -> list[tuple[str, str, str]]:
         pass
 
     try:
+        result = _run_quota_command(["opencode", "auth", "export", "openai"])
+        if result.returncode == 0:
+            exported = json.loads(result.stdout)
+            if isinstance(exported, list):
+                for account in exported:
+                    if not isinstance(account, dict):
+                        continue
+                    value = account.get("value") or {}
+                    if isinstance(value, dict) and value.get("type") == "oauth":
+                        token = value.get("access")
+                        if isinstance(token, str) and token:
+                            candidates.append(("OpenCode", token))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+
+    try:
         with open(OPENCODE_AUTH_FILE, encoding="utf-8") as f:
             provider = json.load(f).get("openai") or {}
         token = provider.get("access")
@@ -375,19 +474,132 @@ def _codex_min_remaining(account: dict) -> float:
     return min(pcts) if pcts else float("inf")
 
 
+def _normalise_codex_resets(
+    reset_credits_payload: dict | None,
+    fallback_data: dict | None = None,
+) -> dict:
+    avail = None
+    if reset_credits_payload and isinstance(reset_credits_payload, dict):
+        avail = reset_credits_payload.get("available_count")
+    if avail is None and fallback_data and isinstance(fallback_data, dict):
+        avail = fallback_data.get("available_count")
+    if avail is None:
+        avail = 0
+
+    credits_list = []
+    if reset_credits_payload and isinstance(reset_credits_payload.get("credits"), list):
+        now = datetime.now(timezone.utc)
+        for c in reset_credits_payload["credits"]:
+            if c.get("status") != "available" or c.get("redeemed_at"):
+                continue
+            exp_str = c.get("expires_at")
+            exp_dt = None
+            if exp_str:
+                try:
+                    exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            countdown = "N/A"
+            date_str = "N/A"
+            is_expired = False
+            if exp_dt:
+                diff = exp_dt - now
+                total_secs = diff.total_seconds()
+                if total_secs <= 0:
+                    is_expired = True
+                    countdown = "Expirado"
+                else:
+                    hours = int(total_secs // 3600)
+                    mins = int((total_secs % 3600) // 60)
+                    if hours >= 24:
+                        days = hours // 24
+                        hours = hours % 24
+                        countdown = f"{days}d {hours}h"
+                    else:
+                        countdown = f"{hours}h {mins}m"
+                date_str = f"{exp_dt.day:02d}/{exp_dt.month:02d}"
+
+            if not is_expired:
+                credits_list.append({
+                    "id": c.get("id"),
+                    "expires_at": exp_str,
+                    "date": date_str,
+                    "countdown": countdown,
+                    "exp_dt": exp_dt,
+                })
+
+    if credits_list:
+        credits_list.sort(key=lambda x: x["exp_dt"] or datetime.max.replace(tzinfo=timezone.utc))
+        avail = len(credits_list)
+
+    if avail == 0:
+        summary = "Sin resets disponibles"
+        short_summary = "0 disp."
+    elif not credits_list:
+        summary = f"{avail} disponibles" if avail > 1 else f"{avail} disponible"
+        short_summary = f"{avail} disp."
+    else:
+        from collections import OrderedDict
+
+        by_date = OrderedDict()
+        for c in credits_list:
+            d = c["date"]
+            if d not in by_date:
+                by_date[d] = []
+            by_date[d].append(c)
+
+        parts = []
+        is_first = True
+        for d, items in by_date.items():
+            count = len(items)
+            first_countdown = items[0]["countdown"]
+            if is_first:
+                if count > 1:
+                    parts.append(f"{count} el {d} ({first_countdown})")
+                else:
+                    parts.append(f"1 el {d} ({first_countdown})")
+                is_first = False
+            else:
+                parts.append(f"{count} el {d}")
+        summary = " · ".join(parts)
+        short_summary = f"{avail} disp. ({parts[0]})"
+
+    return {
+        "available_count": avail,
+        "credits": [
+            {k: v for k, v in c.items() if k != "exp_dt"}
+            for c in credits_list
+        ],
+        "summary": summary,
+        "short_summary": short_summary,
+    }
+
+
 def _fetch_codex_account(label: str, token: str, account_id: str) -> dict:
-    request = urllib.request.Request(
-        CODEX_USAGE_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "ChatGPT-Account-ID": account_id,
-            "Accept": "application/json",
-            "User-Agent": "ai-usage-monitor/1.0",
-        },
-    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "ChatGPT-Account-ID": account_id,
+        "Accept": "application/json",
+        "User-Agent": "ai-usage-monitor/1.0",
+    }
+    request = urllib.request.Request(CODEX_USAGE_URL, headers=headers)
     with urllib.request.urlopen(request, timeout=15) as response:
         payload = json.load(response)
     rate_limit = payload.get("rate_limit") or {}
+
+    reset_credits_payload = None
+    try:
+        rc_request = urllib.request.Request(CODEX_RESET_CREDITS_URL, headers=headers)
+        with urllib.request.urlopen(rc_request, timeout=10) as rc_resp:
+            reset_credits_payload = json.load(rc_resp)
+    except Exception:
+        pass
+
+    reset_credits = _normalise_codex_resets(
+        reset_credits_payload=reset_credits_payload,
+        fallback_data=payload.get("rate_limit_reset_credits"),
+    )
+
     return {
         "label": label,
         "email": payload.get("email"),
@@ -395,6 +607,7 @@ def _fetch_codex_account(label: str, token: str, account_id: str) -> dict:
         "primary": _normalise_codex_window(rate_limit.get("primary_window") or {}, 18_000),
         "secondary": _normalise_codex_window(rate_limit.get("secondary_window") or {}, 604_800),
         "credits": payload.get("credits"),
+        "reset_credits": reset_credits,
         "source": "OpenAI usage API",
     }
 
@@ -402,24 +615,28 @@ def _fetch_codex_account(label: str, token: str, account_id: str) -> dict:
 def get_codex_quota() -> dict:
     """Consulta en vivo las cuentas distintas de Codex y Hermes."""
     accounts = []
+    unavailable = []
     errors = []
     for label, token, account_id in _codex_credentials():
         try:
             accounts.append(_fetch_codex_account(label, token, account_id))
         except urllib.error.HTTPError as exc:
             errors.append(f"{label}: HTTP {exc.code}")
+            unavailable.append({"label": label, "status": "error", "error": f"HTTP {exc.code}"})
         except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
             errors.append(f"{label}: {exc}")
+            unavailable.append({"label": label, "status": "error", "error": "No se pudo consultar la cuota"})
 
     if not accounts:
         fallback = get_codex_quota_from_sessions()
         if errors and fallback.get("status") != "ok":
             fallback["error"] = "; ".join(errors)
+            fallback["data"] = {"accounts": unavailable}
         return fallback
 
     # Compatibilidad: consumidores antiguos ven la cuenta con menor cuota expuesta.
     summary = min(accounts, key=_codex_min_remaining)
-    return {"status": "ok", "data": {**summary, "accounts": accounts}}
+    return {"status": "ok", "data": {**summary, "accounts": accounts + unavailable}}
 
 
 def get_codex_quota_from_sessions() -> dict:
@@ -529,43 +746,13 @@ def get_codex_quota_from_sessions() -> dict:
                 "resets_in": _ts_to_countdown(secondary.get("resets_at")),
             },
             "credits": credits,
+            "reset_credits": None,
             "source_file": os.path.basename(latest_file) if latest_file else None,
         },
     }
 
     return result
 
-
-def _ts_to_iso(ts) -> str | None:
-    """Convierte timestamp Unix a ISO string."""
-    if not ts:
-        return None
-    try:
-        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()  # noqa: UP017
-    except Exception:
-        return str(ts)
-
-
-def _ts_to_countdown(ts) -> str:
-    """Convierte timestamp Unix a countdown legible (ej: '3h 42m')."""
-    if not ts:
-        return "N/A"
-    try:
-        now = datetime.now(tz=timezone.utc)  # noqa: UP017
-        reset = datetime.fromtimestamp(ts, tz=timezone.utc)  # noqa: UP017
-        diff = reset - now
-        total_secs = diff.total_seconds()
-        if total_secs <= 0:
-            return "Ya reseteado"
-        hours = int(total_secs // 3600)
-        mins = int((total_secs % 3600) // 60)
-        if hours > 24:
-            days = hours // 24
-            hours = hours % 24
-            return f"{days}d {hours}h"
-        return f"{hours}h {mins}m"
-    except Exception:
-        return "N/A"
 
 
 # ═══════════════════════════════════════════════════════
@@ -713,8 +900,16 @@ def render_terminal(all_data: dict) -> str:
                 pct = group.get("remaining_5h_percent", 0)
                 bar = _progress_bar(pct)
                 emoji = "🟢" if pct > 50 else "🟡" if pct > 20 else "🔴"
-                lines.append(f"  │ {emoji} {name[:28]:<28} {bar} {pct:>5.1f}% (5h)")
-                lines.append("  │    Cuota semanal: no expuesta por la fuente de solo lectura")
+                r5h = group.get("reset_5h_in") or _ts_to_countdown(group.get("reset_5h_at"))
+                reset_info = f" · reset: {r5h}" if r5h and r5h != "N/A" else ""
+                lines.append(f"  │ {emoji} {name[:20]:<20} {bar} {pct:>5.1f}% (5h{reset_info})")
+                weekly = group.get("weekly_remaining_percent")
+                if isinstance(weekly, (int, float)):
+                    rw = group.get("reset_weekly_in") or _ts_to_countdown(group.get("reset_weekly_at"))
+                    rw_info = f" (reset: {rw})" if rw and rw != "N/A" else ""
+                    lines.append(f"  │    Cuota semanal (7d): {weekly:>5.1f}%{rw_info}")
+                else:
+                    lines.append("  │    Cuota semanal: no expuesta por la fuente de solo lectura")
         else:
             lines.append("  │ ✅ Conectado (sin datos detallados de modelo)                   │")
     elif ag.get("status") == "error":
@@ -743,6 +938,13 @@ def render_terminal(all_data: dict) -> str:
                 lines.append(
                     f"  │    {window_name}: {remaining:>5.1f}% ({window.get('resets_in', '?')})"
                 )
+            reset_credits = account.get("reset_credits") or {}
+            avail = reset_credits.get("available_count", 0)
+            summary = reset_credits.get("summary")
+            if avail > 0 and summary:
+                lines.append(f"  │    🔄 Resets: {avail} disp. ({summary})")
+            elif avail > 0:
+                lines.append(f"  │    🔄 Resets: {avail} disponibles")
 
     elif cx.get("status") == "error":
         err = cx.get("error", "Error")[:55]
@@ -835,7 +1037,10 @@ def build_quota_snapshot(all_data: dict) -> dict:
     if antigravity.get("status") == "ok":
         family_minimums = {}
         for group in antigravity["data"].get("groups", []):
-            key = "gemini" if group.get("label") == "Gemini" else "claude_gpt"
+            label = _antigravity_family(group.get("label", ""))
+            key = AGY_FAMILY_KEYS.get(label) or re.sub(r"\W+", "_", label.lower()).strip("_")
+            if not key:
+                continue
             windows = family_minimums.setdefault(key, {})
             for window_name, field in (("5h", "remaining_5h_percent"), ("7d", "weekly_remaining_percent")):
                 remaining = group.get(field)
@@ -882,8 +1087,8 @@ def build_quota_identities(all_data: dict) -> dict:
     if antigravity.get("status") == "ok":
         email = antigravity["data"].get("email")
         if isinstance(email, str) and "@" in email:
-            identities["agy:claude_gpt"] = email
-            identities["agy:gemini"] = email
+            for key in AGY_FAMILY_KEYS.values():
+                identities[f"agy:{key}"] = email
 
     zai = all_data.get("zai", {})
     email = (zai.get("data") or {}).get("email") or _local_zai_email()

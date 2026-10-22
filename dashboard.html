@@ -314,11 +314,34 @@
                         let resetText = '';
                         if (group.reset_5h_at) {
                             const rt = new Date(group.reset_5h_at);
-                            resetText = `<span class="reset-text">Reset 5h: ${rt.toLocaleString()}</span>`;
+                            const now = new Date();
+                            const diffMs = rt.getTime() - now.getTime();
+                            let cd = '';
+                            if (diffMs > 0) {
+                                const totalMins = Math.floor(diffMs / 60000);
+                                const h = Math.floor(totalMins / 60);
+                                const m = totalMins % 60;
+                                cd = h >= 24 ? `en ${Math.floor(h / 24)}d ${h % 24}h` : `en ${h}h ${m}m`;
+                            } else {
+                                cd = 'reseteado';
+                            }
+                            resetText = `<span class="reset-text">↳ Reset 5h: ${cd} (${rt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})})</span>`;
+                        }
+                        let weeklyResetText = '';
+                        if (group.reset_weekly_at) {
+                            const rw = new Date(group.reset_weekly_at);
+                            const now = new Date();
+                            const diffMs = rw.getTime() - now.getTime();
+                            if (diffMs > 0) {
+                                const totalHours = Math.floor(diffMs / 3600000);
+                                const d = Math.floor(totalHours / 24);
+                                const h = totalHours % 24;
+                                weeklyResetText = ` · reset en ${d}d ${h}h`;
+                            }
                         }
                         const weeklyText = weekly == null
                             ? 'Semanal: no expuesta por la fuente de solo lectura'
-                            : `Semanal: ${weekly.toFixed(0)}%${group.reset_weekly_at ? ` · reset ${new Date(group.reset_weekly_at).toLocaleString()}` : ''}`;
+                            : `Semanal: ${weekly.toFixed(0)}%${weeklyResetText}`;
                         modelsHTML += `
                             <div class="model-row">
                                 <div class="model-info">
@@ -412,7 +435,7 @@
 
                         <div class="note-box">
                             ${account.email || ''}<br>
-                            Fuente: ${account.source || 'logs locales'}.
+                            ${account.reset_credits && account.reset_credits.available_count > 0 ? `🔄 <strong>Resets:</strong> ${account.reset_credits.available_count} disponibles (${account.reset_credits.summary})<br>` : ''}Fuente: ${account.source || 'logs locales'}.
                         </div>
                     </div>
                     `;

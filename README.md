@@ -51,11 +51,11 @@ Se inicia automáticamente con Windows. Muestra barras en la taskbar para Claude
 ### Antigravity IDE
 - **Fuente**: `agy --print "/usage"`, que expone cuotas separadas por familia y ventana
 - **Auth**: OAuth 2.0 de Google gestionado por `agy`
-- **Datos**: cuota semanal y de 5 horas para Gemini y Claude/GPT
+- **Datos**: Gemini y Claude/GPT conservan sus ventanas semanal y de 5 horas. Gemini 4 Argon se muestra como grupo separado; si la CLI solo expone su cuota semanal, no se inventa una ventana de 5 horas.
 - **Fallback**: `antigravity-usage quota --refresh`; si falla, el último snapshot se marca como desactualizado y no se presenta como cuota actual
 
 ### OpenAI Codex
-- **Fuentes OAuth**: `~/.codex/auth.json`, `%LOCALAPPDATA%/hermes/auth.json` y `~/.local/share/opencode/auth.json`
+- **Fuentes OAuth**: `~/.codex/auth.json`, `%LOCALAPPDATA%/hermes/auth.json` y la interfaz `opencode auth export openai` de OpenCode 2; el antiguo `~/.local/share/opencode/auth.json` queda como respaldo para instalaciones anteriores. Las credenciales se capturan en memoria y no se imprimen ni exportan a archivos.
 - **API**: consulta de uso autenticada; los tokens sólo se leen en memoria
 - **Multi-cuenta**: deduplica por `chatgpt_account_id`; ante la misma cuenta prefiere el token vigente (si el cacheado de un tool expira, usa el de otro tool que siga vivo)
 - **Datos**: `used_percent` por ventana (5h/7d). La API cambió de forma: puede exponer solo la semanal como `primary` con `secondary` en null — las ventanas se etiquetan por su duración real (`window_hours`), no por posición
@@ -66,7 +66,9 @@ Se inicia automáticamente con Windows. Muestra barras en la taskbar para Claude
 
 - Un único proceso `pythonw.exe` en la bandeja.
 - Actualización cada 120 segundos.
-- No lanza procesos Python hijos por actualización; sólo `antigravity-usage` cuando consulta Google.
+- Las consultas nativas de `agy` y el fallback `antigravity-usage` se ejecutan con la ventana oculta. `agy` se inicia directamente, sin un shell intermedio.
+- El indicador y el tooltip incluyen grupos que solo exponen cuota semanal, como Argon. Cada grupo mantiene su tarjeta y sus ventanas disponibles.
+- El popup abierto se actualiza con cada consulta. Si la consulta nativa de AGY falla, conserva el ultimo resultado nativo como desactualizado; si falla una cuenta GPT, mantiene su tarjeta con el error en vez de ocultarla.
 
 ### Z.AI Coding Plan
 - **Sin endpoint de billing**: Probados 12+ endpoints → todos 404
