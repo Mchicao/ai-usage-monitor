@@ -21,3 +21,7 @@ __pycache__/
 *.png
 # Tool outputs / previews
 .cache/
+
+# Rust build artifacts
+target/
+**/target/

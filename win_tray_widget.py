@@ -18,6 +18,7 @@ import socketserver
 import threading
 import sys
 import time
+import ctypes
 
 import customtkinter as ctk
 import pystray
@@ -45,6 +46,20 @@ tk_root = None
 dashboard_server = None
 dashboard_lock = threading.Lock()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def is_game_or_fullscreen_active() -> bool:
+    """Verifica si hay un juego o app fullscreen DirectX ejecutándose (QUNS_RUNNING_D3D_FULL_SCREEN = 3 o QUNS_PRESENTATION_MODE = 4)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        state = ctypes.c_int()
+        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) == 0:
+            # 3 = D3D fullscreen (BF6, juegos), 4 = presentación/exclusivo
+            return state.value in (3, 4)
+    except Exception:
+        pass
+    return False
 
 
 def fetch_quota_data() -> dict:
@@ -618,6 +633,10 @@ def refresh_open_popup():
 def refresh_loop(icon):
     global latest_data
     while True:
+        # Game Mode: Si estás en un juego Fullscreen/DirectX, pausar el polling para evitar interrupciones
+        if is_game_or_fullscreen_active():
+            time.sleep(30)
+            continue
         latest_data = fetch_quota_data()
         if tk_root:
             try:
