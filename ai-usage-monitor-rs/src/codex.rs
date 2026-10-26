@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::models::{
-    format_countdown_unix, CodexAccount, CodexData, CodexWindow, ServiceResult,
+    format_countdown_unix, CodexAccount, CodexData, CodexWindow, ResetCredits, ServiceResult,
 };
 
 fn home_dir() -> Option<PathBuf> {
@@ -57,9 +57,22 @@ fn dedupe_credentials(candidates: Vec<(String, String)>) -> Vec<(String, String,
         }
     }
 
-    map.into_iter()
+    let mut result: Vec<(String, String, String)> = map
+        .into_iter()
         .map(|(acc_id, (label, token, _))| (label, token, acc_id))
-        .collect()
+        .collect();
+
+    // Prefer Codex first, OpenCode second
+    result.sort_by(|a, b| {
+        let order = |label: &str| match label {
+            "Codex" => 0,
+            "OpenCode" => 1,
+            _ => 2,
+        };
+        order(&a.0).cmp(&order(&b.0))
+    });
+
+    result
 }
 
 fn codex_credentials() -> Vec<(String, String, String)> {
@@ -106,7 +119,8 @@ fn codex_credentials() -> Vec<(String, String, String)> {
         }
     }
 
-    // 3. OpenCode auth.json (Direct local reading, 0 subprocesses)
+    // 3. OpenCode: check auth.json first
+    let mut opencode_token_found = false;
     let opencode_auth_path = home
         .join(".local")
         .join("share")
@@ -119,7 +133,41 @@ fn codex_credentials() -> Vec<(String, String, String)> {
                 .and_then(|p| p.get("access"))
                 .and_then(|t| t.as_str())
             {
-                candidates.push(("OpenCode".to_string(), tok.to_string()));
+                if !token_is_expired(tok) {
+                    candidates.push(("OpenCode".to_string(), tok.to_string()));
+                    opencode_token_found = true;
+                }
+            }
+        }
+    }
+
+    // If not found or expired, run `opencode auth export openai`
+    if !opencode_token_found {
+        let mut cmd = std::process::Command::new("opencode");
+        cmd.args(["auth", "export", "openai"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                if let Ok(val) = serde_json::from_slice::<Value>(&output.stdout) {
+                    if let Some(arr) = val.as_array() {
+                        for item in arr {
+                            if let Some(access) = item
+                                .get("value")
+                                .and_then(|v| v.get("access"))
+                                .and_then(|a| a.as_str())
+                            {
+                                if !access.is_empty() {
+                                    candidates.push(("OpenCode".to_string(), access.to_string()));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -190,6 +238,12 @@ async fn fetch_account_usage(
         .get("secondary_window")
         .map(|w| normalise_window(w, 7 * 24 * 3600));
 
+    let reset_credits = body
+        .get("rate_limit_reset_credits")
+        .and_then(|r| r.get("available_count"))
+        .and_then(|v| v.as_i64())
+        .map(|count| ResetCredits { available_count: Some(count) });
+
     Ok(CodexAccount {
         label: label.to_string(),
         account_id: Some(account_id.to_string()),
@@ -197,6 +251,7 @@ async fn fetch_account_usage(
         plan_type,
         primary,
         secondary,
+        reset_credits,
         status: Some("ok".to_string()),
         error: None,
     })
@@ -224,39 +279,19 @@ pub async fn fetch_codex_quota(client: &reqwest::Client) -> ServiceResult<CodexD
                 plan_type: None,
                 primary: None,
                 secondary: None,
+                reset_credits: None,
                 status: Some("error".to_string()),
                 error: Some(e),
             }),
         }
     }
 
-    let valid_accounts: Vec<&CodexAccount> = accounts.iter().filter(|a| a.status.as_deref() == Some("ok")).collect();
-    if valid_accounts.is_empty() {
-        return ServiceResult {
-            status: "error".to_string(),
-            data: Some(CodexData {
-                summary: None,
-                accounts,
-            }),
-            source: Some("Codex live".to_string()),
-            error: Some("Error al consultar todas las cuentas de Codex".to_string()),
-        };
-    }
-
-    // Find summary: account with minimum remaining percent
-    let min_account = valid_accounts
-        .into_iter()
-        .min_by(|a, b| {
-            let p_a = a.primary.as_ref().and_then(|p| p.remaining_percent).unwrap_or(100.0);
-            let p_b = b.primary.as_ref().and_then(|p| p.remaining_percent).unwrap_or(100.0);
-            p_a.partial_cmp(&p_b).unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .cloned();
+    let summary = accounts.first().cloned();
 
     ServiceResult {
         status: "ok".to_string(),
         data: Some(CodexData {
-            summary: min_account,
+            summary,
             accounts,
         }),
         source: Some("Codex live".to_string()),

@@ -33,6 +33,11 @@ pub struct CodexWindow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetCredits {
+    pub available_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexAccount {
     pub label: String,
     pub account_id: Option<String>,
@@ -40,6 +45,7 @@ pub struct CodexAccount {
     pub plan_type: Option<String>,
     pub primary: Option<CodexWindow>,
     pub secondary: Option<CodexWindow>,
+    pub reset_credits: Option<ResetCredits>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -73,11 +79,9 @@ pub struct ZaiData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceResult<T> {
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -89,47 +93,61 @@ pub struct AllQuotasSnapshot {
     pub timestamp: String,
 }
 
-pub fn format_countdown(reset_iso: Option<&str>) -> String {
-    let Some(iso) = reset_iso else {
+pub fn format_countdown(iso_str: Option<&str>) -> String {
+    let Some(raw) = iso_str else {
         return "N/A".to_string();
     };
-    let Ok(target) = DateTime::parse_from_rfc3339(iso) else {
-        return "N/A".to_string();
-    };
-    let now = Utc::now();
-    let diff = target.signed_duration_since(now);
-    let total_secs = diff.num_seconds();
-    if total_secs <= 0 {
-        return "0m".to_string();
-    }
-    let total_mins = total_secs / 60;
-    let days = total_mins / (24 * 60);
-    let hours = (total_mins % (24 * 60)) / 60;
-    let mins = total_mins % 60;
 
-    if days > 0 {
-        format!("{}d {}h", days, hours)
+    let dt = if let Ok(d) = DateTime::parse_from_rfc3339(raw) {
+        d.with_timezone(&Utc)
+    } else {
+        return "N/A".to_string();
+    };
+
+    let now = Utc::now();
+    let diff = dt.signed_duration_since(now);
+    let total_secs = diff.num_seconds();
+
+    if total_secs <= 0 {
+        return "Ya reseteado".to_string();
+    }
+
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+
+    if hours >= 24 {
+        let days = hours / 24;
+        let rem_hours = hours % 24;
+        format!("{}d {}h", days, rem_hours)
     } else {
         format!("{}h {}m", hours, mins)
     }
 }
 
-pub fn format_countdown_unix(ts: Option<i64>) -> String {
-    let Some(ts_val) = ts else {
+pub fn format_countdown_unix(ts_opt: Option<i64>) -> String {
+    let Some(ts) = ts_opt else {
         return "N/A".to_string();
     };
-    let now = Utc::now().timestamp();
-    let diff = ts_val - now;
-    if diff <= 0 {
-        return "0m".to_string();
-    }
-    let total_mins = diff / 60;
-    let days = total_mins / (24 * 60);
-    let hours = (total_mins % (24 * 60)) / 60;
-    let mins = total_mins % 60;
 
-    if days > 0 {
-        format!("{}d {}h", days, hours)
+    let Some(dt) = DateTime::from_timestamp(ts, 0) else {
+        return "N/A".to_string();
+    };
+
+    let now = Utc::now();
+    let diff = dt.signed_duration_since(now);
+    let total_secs = diff.num_seconds();
+
+    if total_secs <= 0 {
+        return "Ya reseteado".to_string();
+    }
+
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+
+    if hours >= 24 {
+        let days = hours / 24;
+        let rem_hours = hours % 24;
+        format!("{}d {}h", days, rem_hours)
     } else {
         format!("{}h {}m", hours, mins)
     }

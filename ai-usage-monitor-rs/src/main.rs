@@ -4,6 +4,7 @@ mod antigravity;
 mod codex;
 mod game_mode;
 mod models;
+mod popup;
 mod tray;
 mod zai;
 
@@ -29,7 +30,7 @@ const WM_TRAY: u32 = WM_USER + 20;
 const WM_APPLY_SNAPSHOT: u32 = WM_USER + 21;
 const ID_TRAY: u32 = 1001;
 
-const IDM_OPEN_DASH: usize = 2001;
+const IDM_SHOW_POPUP: usize = 2001;
 const IDM_SYNC_NOW: usize = 2002;
 const IDM_EXIT: usize = 2003;
 
@@ -110,12 +111,6 @@ fn write_snapshot(snapshot: &AllQuotasSnapshot) {
     }
 }
 
-fn open_dashboard_url() {
-    let _ = std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", "http://127.0.0.1:8420/"])
-        .spawn();
-}
-
 async fn run_dashboard_server(shared_snapshot: Arc<RwLock<Option<AllQuotasSnapshot>>>) {
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:8420").await {
         Ok(l) => l,
@@ -144,6 +139,10 @@ async fn run_dashboard_server(shared_snapshot: Arc<RwLock<Option<AllQuotasSnapsh
                             body.len(),
                             body
                         );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    } else if req.starts_with("GET /api/show") || req.starts_with("GET /popup") {
+                        popup::show_popup();
+                        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
                         let _ = stream.write_all(response.as_bytes()).await;
                     } else if req.starts_with("GET / ") || req.starts_with("GET /dashboard") {
                         let response = format!(
@@ -202,139 +201,142 @@ fn trigger_async_quota_collection() {
             log_debug("collect_all_quotas finished, posting WM_APPLY_SNAPSHOT...");
             let boxed = Box::new(snapshot);
             let raw_ptr = Box::into_raw(boxed) as usize;
-            unsafe {
-                let _ = PostMessageW(HWND(hwnd_raw as *mut _), WM_APPLY_SNAPSHOT, WPARAM(raw_ptr), LPARAM(0));
-            }
+            let _ = PostMessageW(HWND(hwnd_raw as *mut _), WM_APPLY_SNAPSHOT, WPARAM(raw_ptr), LPARAM(0));
         });
     }
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_APPLY_SNAPSHOT => {
-            log_debug("WM_APPLY_SNAPSHOT received");
-            let raw_ptr = wparam.0 as *mut AllQuotasSnapshot;
-            if !raw_ptr.is_null() {
-                let snapshot = *Box::from_raw(raw_ptr);
-                IS_UPDATING.store(false, Ordering::SeqCst);
+    unsafe {
+        match msg {
+            WM_APPLY_SNAPSHOT => {
+                log_debug("WM_APPLY_SNAPSHOT received");
+                let raw_ptr = wparam.0 as *mut AllQuotasSnapshot;
+                if !raw_ptr.is_null() {
+                    let snapshot = *Box::from_raw(raw_ptr);
+                    IS_UPDATING.store(false, Ordering::SeqCst);
 
-                write_snapshot(&snapshot);
-                log_debug("Snapshot written to disk");
+                    write_snapshot(&snapshot);
+                    log_debug("Snapshot written to disk");
 
-                if let Some(ref mut state) = APP_STATE {
-                    let shared = state.shared_snapshot.clone();
-                    let snap_copy = snapshot.clone();
-                    state.rt_handle.spawn(async move {
-                        let mut lock = shared.write().await;
-                        *lock = Some(snap_copy);
-                    });
+                    popup::update_popup_data(&snapshot);
 
-                    if let Some(new_icon) = tray::create_tray_hicon(&snapshot) {
-                        if let Some(old) = state.current_hicon.take() {
-                            let _ = DestroyIcon(old);
-                        }
-                        state.current_hicon = Some(new_icon);
+                    if let Some(ref mut state) = APP_STATE {
+                        let shared = state.shared_snapshot.clone();
+                        let snap_copy = snapshot.clone();
+                        state.rt_handle.spawn(async move {
+                            let mut lock = shared.write().await;
+                            *lock = Some(snap_copy);
+                        });
 
-                        let tooltip = tray::create_tooltip(&snapshot);
-                        let mut sz_tip: [u16; 128] = [0; 128];
-                        let tip_utf16: Vec<u16> = tooltip.encode_utf16().collect();
-                        for (i, c) in tip_utf16.iter().enumerate() {
-                            if i < 127 {
-                                sz_tip[i] = *c;
+                        if let Some(new_icon) = tray::create_tray_hicon(&snapshot) {
+                            if let Some(old) = state.current_hicon.take() {
+                                let _ = DestroyIcon(old);
                             }
-                        }
+                            state.current_hicon = Some(new_icon);
 
-                        let mut nid = NOTIFYICONDATAW {
-                            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-                            hWnd: hwnd,
-                            uID: ID_TRAY,
-                            uFlags: NIF_ICON | NIF_TIP,
-                            hIcon: new_icon,
-                            szTip: sz_tip,
-                            ..std::mem::zeroed()
-                        };
-                        let _ = Shell_NotifyIconW(NIM_MODIFY, &mut nid);
-                        log_debug("Shell_NotifyIconW NIM_MODIFY called successfully");
+                            let tooltip = tray::create_tooltip(&snapshot);
+                            let mut sz_tip: [u16; 128] = [0; 128];
+                            let tip_utf16: Vec<u16> = tooltip.encode_utf16().collect();
+                            for (i, c) in tip_utf16.iter().enumerate() {
+                                if i < 127 {
+                                    sz_tip[i] = *c;
+                                }
+                            }
+
+                            let mut nid = NOTIFYICONDATAW {
+                                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                                hWnd: hwnd,
+                                uID: ID_TRAY,
+                                uFlags: NIF_ICON | NIF_TIP,
+                                hIcon: new_icon,
+                                szTip: sz_tip,
+                                ..std::mem::zeroed()
+                            };
+                            let _ = Shell_NotifyIconW(NIM_MODIFY, &mut nid);
+                            log_debug("Shell_NotifyIconW NIM_MODIFY called successfully");
+                        }
                     }
                 }
-            }
-            LRESULT(0)
-        }
-
-        WM_TRAY => {
-            let event = lparam.0 as u32;
-            if event == WM_LBUTTONUP {
-                log_debug("WM_TRAY WM_LBUTTONUP: opening dashboard");
-                open_dashboard_url();
-            } else if event == WM_RBUTTONUP {
-                log_debug("WM_TRAY WM_RBUTTONUP: displaying context menu");
-                let mut cursor = POINT::default();
-                let _ = GetCursorPos(&mut cursor);
-
-                let hmenu = CreatePopupMenu().unwrap();
-                let _ = AppendMenuW(hmenu, MF_STRING, IDM_OPEN_DASH, w!("🌐 Abrir Dashboard Web"));
-                let _ = AppendMenuW(hmenu, MF_STRING, IDM_SYNC_NOW, w!("🔄 Sincronizar Ahora"));
-                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
-                let _ = AppendMenuW(hmenu, MF_STRING, IDM_EXIT, w!("❌ Salir"));
-
-                let _ = SetForegroundWindow(hwnd);
-                let _ = TrackPopupMenuEx(
-                    hmenu,
-                    0,
-                    cursor.x,
-                    cursor.y,
-                    hwnd,
-                    None,
-                );
-                let _ = DestroyMenu(hmenu);
-            }
-            LRESULT(0)
-        }
-
-        WM_COMMAND => {
-            let cmd = wparam.0 as usize;
-            match cmd {
-                IDM_OPEN_DASH => {
-                    open_dashboard_url();
-                }
-                IDM_SYNC_NOW => {
-                    trigger_async_quota_collection();
-                }
-                IDM_EXIT => {
-                    let _ = DestroyWindow(hwnd);
-                }
-                _ => {}
-            }
-            LRESULT(0)
-        }
-
-        WM_TIMER => {
-            log_debug("WM_TIMER fired, triggering collection");
-            trigger_async_quota_collection();
-            LRESULT(0)
-        }
-
-        WM_DESTROY => {
-            log_debug("WM_DESTROY received, cleaning up");
-            let mut nid = NOTIFYICONDATAW {
-                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-                hWnd: hwnd,
-                uID: ID_TRAY,
-                ..std::mem::zeroed()
-            };
-            let _ = Shell_NotifyIconW(NIM_DELETE, &mut nid);
-
-            if let Some(ref mut state) = APP_STATE {
-                if let Some(icon) = state.current_hicon.take() {
-                    let _ = DestroyIcon(icon);
-                }
+                LRESULT(0)
             }
 
-            PostQuitMessage(0);
-            LRESULT(0)
-        }
+            WM_TRAY => {
+                let event = lparam.0 as u32;
+                if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
+                    log_debug("WM_TRAY: toggle popup");
+                    popup::toggle_popup();
+                } else if event == WM_RBUTTONUP {
+                    log_debug("WM_TRAY WM_RBUTTONUP: displaying context menu");
+                    let mut cursor = POINT::default();
+                    let _ = GetCursorPos(&mut cursor);
 
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+                    let hmenu = CreatePopupMenu().unwrap();
+                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_SHOW_POPUP, w!("📊 Ver Detalle de Cuotas"));
+                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_SYNC_NOW, w!("🔄 Sincronizar Ahora"));
+                    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_EXIT, w!("❌ Salir"));
+
+                    let _ = SetForegroundWindow(hwnd);
+                    let _ = TrackPopupMenuEx(
+                        hmenu,
+                        0,
+                        cursor.x,
+                        cursor.y,
+                        hwnd,
+                        None,
+                    );
+                    let _ = DestroyMenu(hmenu);
+                }
+                LRESULT(0)
+            }
+
+            WM_COMMAND => {
+                let cmd = wparam.0 as usize;
+                match cmd {
+                    IDM_SHOW_POPUP => {
+                        popup::show_popup();
+                    }
+                    IDM_SYNC_NOW => {
+                        trigger_async_quota_collection();
+                    }
+                    IDM_EXIT => {
+                        let _ = DestroyWindow(hwnd);
+                    }
+                    _ => {}
+                }
+                LRESULT(0)
+            }
+
+            WM_TIMER => {
+                log_debug("WM_TIMER fired, triggering collection");
+                trigger_async_quota_collection();
+                LRESULT(0)
+            }
+
+            WM_DESTROY => {
+                log_debug("WM_DESTROY received, cleaning up");
+                popup::hide_popup();
+                let mut nid = NOTIFYICONDATAW {
+                    cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                    hWnd: hwnd,
+                    uID: ID_TRAY,
+                    ..std::mem::zeroed()
+                };
+                let _ = Shell_NotifyIconW(NIM_DELETE, &mut nid);
+
+                if let Some(ref mut state) = APP_STATE {
+                    if let Some(icon) = state.current_hicon.take() {
+                        let _ = DestroyIcon(icon);
+                    }
+                }
+
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
     }
 }
 
@@ -421,6 +423,11 @@ fn main() {
         let m = CreateMutexW(None, true, w!("Local\\AIUsageMonitorRustMutex"));
         if GetLastError() == windows::Win32::Foundation::ERROR_ALREADY_EXISTS {
             log_debug("Another instance is already running according to mutex. Exiting.");
+            if args.iter().any(|a| a == "--popup" || a == "--show") {
+                let _ = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-Command", "Invoke-RestMethod -Uri 'http://127.0.0.1:8420/popup' -TimeoutSec 1"])
+                    .output();
+            }
             return;
         }
         m
@@ -428,9 +435,12 @@ fn main() {
 
     let shared_snapshot = Arc::new(RwLock::new(None));
 
-    // Spawn internal dashboard HTTP server on 127.0.0.1:8420
+    // Spawn internal HTTP server on 127.0.0.1:8420 for /api/quota and /popup
     rt.spawn(run_dashboard_server(shared_snapshot.clone()));
     log_debug("Dashboard server task spawned");
+
+    // Initialize native popup window
+    let _popup_hwnd = popup::init_popup();
 
     // Create native hidden window for tray icon
     unsafe {
@@ -487,7 +497,7 @@ fn main() {
         });
 
         let mut sz_tip: [u16; 128] = [0; 128];
-        let tip: Vec<u16> = "AI Usage Monitor (Rust)\0".encode_utf16().collect();
+        let tip: Vec<u16> = "AI Usage Monitor (Rust)\n(Click para detalles)\0".encode_utf16().collect();
         for (i, c) in tip.iter().enumerate() {
             if i < 127 {
                 sz_tip[i] = *c;
@@ -513,6 +523,10 @@ fn main() {
 
         // Immediate first quota collection
         trigger_async_quota_collection();
+
+        if args.iter().any(|a| a == "--popup" || a == "--show") {
+            popup::show_popup();
+        }
 
         log_debug("Entering native GetMessageW loop");
         let mut msg = MSG::default();

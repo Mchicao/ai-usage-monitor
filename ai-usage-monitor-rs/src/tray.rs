@@ -59,12 +59,11 @@ pub unsafe fn create_hicon_from_rgba(rgba: &[u8], width: i32, height: i32) -> Op
 pub fn create_default_icon() -> Option<HICON> {
     let size = 32u32;
     let mut img = RgbaImage::new(size, size);
-    for y in 0..size {
-        for x in 0..size {
-            let dx = (x as f32) - 15.5;
-            let dy = (y as f32) - 15.5;
-            if dx * dx + dy * dy <= 14.0 * 14.0 {
-                img.put_pixel(x, y, Rgba([88, 166, 255, 255]));
+    for y in 4..28 {
+        for i in 0..3 {
+            let x_start = 4 + i * 9;
+            for x in x_start..(x_start + 6) {
+                img.put_pixel(x, y, Rgba([48, 54, 61, 255]));
             }
         }
     }
@@ -75,35 +74,8 @@ pub fn create_tray_hicon(snapshot: &AllQuotasSnapshot) -> Option<HICON> {
     let size = 32u32;
     let mut img = RgbaImage::new(size, size);
 
-    // ZAI percent
-    let mut zai_pct = None;
-    if let Some(ref z) = snapshot.zai.data {
-        for lim in &z.limits {
-            if lim.kind == "coding_5h" {
-                zai_pct = Some(lim.remaining_percent);
-                break;
-            }
-        }
-    }
-
-    // Codex percent
-    let mut codex_pct = None;
-    if let Some(ref c) = snapshot.codex.data {
-        let mut pcts = Vec::new();
-        for acct in &c.accounts {
-            if let Some(ref p) = acct.primary {
-                if let Some(rem) = p.remaining_percent {
-                    pcts.push(rem);
-                }
-            }
-        }
-        if !pcts.is_empty() {
-            codex_pct = pcts.into_iter().min_by(|a, b| a.partial_cmp(b).unwrap());
-        }
-    }
-
-    // Antigravity percent
-    let mut ag_pct = None;
+    // 1. Antigravity percent (lowest among groups)
+    let mut ag_pct: Option<f64> = None;
     if let Some(ref a) = snapshot.antigravity.data {
         let mut pcts = Vec::new();
         for g in &a.groups {
@@ -118,38 +90,72 @@ pub fn create_tray_hicon(snapshot: &AllQuotasSnapshot) -> Option<HICON> {
         }
     }
 
-    let min_pct = match (ag_pct, codex_pct, zai_pct) {
-        (Some(a), Some(c), Some(z)) => a.min(c).min(z),
-        (Some(a), Some(c), None) => a.min(c),
-        (Some(a), None, Some(z)) => a.min(z),
-        (None, Some(c), Some(z)) => c.min(z),
-        (Some(a), None, None) => a,
-        (None, Some(c), None) => c,
-        (None, None, Some(z)) => z,
-        _ => 100.0,
-    };
+    // 2. Codex percent (lowest across accounts and windows)
+    let mut codex_pct: Option<f64> = None;
+    if let Some(ref c) = snapshot.codex.data {
+        let mut pcts = Vec::new();
+        for acct in &c.accounts {
+            if let Some(ref p) = acct.primary {
+                if let Some(rem) = p.remaining_percent {
+                    pcts.push(rem);
+                }
+            }
+            if let Some(ref s) = acct.secondary {
+                if let Some(rem) = s.remaining_percent {
+                    pcts.push(rem);
+                }
+            }
+        }
+        if !pcts.is_empty() {
+            codex_pct = pcts.into_iter().min_by(|a, b| a.partial_cmp(b).unwrap());
+        }
+    }
 
-    let color = if min_pct > 50.0 {
-        Rgba([59, 165, 93, 255]) // Green #3ba55d
-    } else if min_pct > 20.0 {
-        Rgba([245, 158, 11, 255]) // Yellow #f59e0b
-    } else {
-        Rgba([237, 66, 69, 255]) // Red #ed4245
-    };
+    // 3. ZAI percent
+    let mut zai_pct: Option<f64> = None;
+    if let Some(ref z) = snapshot.zai.data {
+        for lim in &z.limits {
+            if lim.kind == "coding_5h" {
+                zai_pct = Some(lim.remaining_percent);
+                break;
+            }
+        }
+    }
 
-    let filled_height = ((size as f64) * (min_pct / 100.0)).round() as u32;
+    let bars = [ag_pct, codex_pct, zai_pct];
+    let bar_w = 6u32;
+    let bar_h = 24u32;
+    let start_x = 4u32;
+    let gap = 9u32;
+    let start_y = 4u32;
 
-    for y in 0..size {
-        for x in 0..size {
-            let dx = (x as f32) - 15.5;
-            let dy = (y as f32) - 15.5;
-            let dist_sq = dx * dx + dy * dy;
+    for (i, pct_opt) in bars.iter().enumerate() {
+        let x_pos = start_x + (i as u32) * gap;
 
-            if dist_sq <= 15.0 * 15.0 {
-                img.put_pixel(x, y, Rgba([30, 30, 30, 255]));
+        // Draw background bar
+        for y in start_y..(start_y + bar_h) {
+            for x in x_pos..(x_pos + bar_w) {
+                img.put_pixel(x, y, Rgba([48, 54, 61, 255]));
+            }
+        }
 
-                if y >= size - filled_height && dist_sq <= 13.0 * 13.0 {
-                    img.put_pixel(x, y, color);
+        // Draw filled bar from bottom
+        if let Some(pct) = pct_opt {
+            let color = if *pct > 50.0 {
+                Rgba([63, 185, 80, 255]) // Green
+            } else if *pct > 20.0 {
+                Rgba([210, 153, 34, 255]) // Yellow
+            } else {
+                Rgba([248, 81, 73, 255]) // Red
+            };
+
+            let fill_h = ((bar_h as f64) * (pct.clamp(0.0, 100.0) / 100.0)).round() as u32;
+            if fill_h > 0 {
+                let fill_start_y = start_y + bar_h - fill_h;
+                for y in fill_start_y..(start_y + bar_h) {
+                    for x in x_pos..(x_pos + bar_w) {
+                        img.put_pixel(x, y, color);
+                    }
                 }
             }
         }
@@ -159,53 +165,67 @@ pub fn create_tray_hicon(snapshot: &AllQuotasSnapshot) -> Option<HICON> {
 }
 
 pub fn create_tooltip(snapshot: &AllQuotasSnapshot) -> String {
-    let mut lines = Vec::new();
-
-    // Antigravity
+    // AG
+    let mut ag_t = "AG:N/A".to_string();
     if let Some(ref a) = snapshot.antigravity.data {
-        lines.push("Antigravity:".to_string());
+        let mut pcts = Vec::new();
         for g in &a.groups {
-            let pct = g.remaining_5h_percent
-                .map(|p| format!("{:.0}%", p))
-                .unwrap_or_else(|| "N/A".to_string());
-            let rst = g.reset_5h_in.as_deref().unwrap_or("-");
-            lines.push(format!(" • {}: {} ({})", g.label, pct, rst));
+            if let Some(p) = g.remaining_5h_percent {
+                pcts.push((p, g.reset_5h_in.as_deref()));
+            } else if let Some(p) = g.weekly_remaining_percent {
+                pcts.push((p, g.reset_weekly_in.as_deref()));
+            }
         }
-    } else {
-        lines.push(format!("Antigravity: {}", snapshot.antigravity.status));
+        if let Some((min_val, rst)) = pcts.into_iter().min_by(|a, b| a.0.partial_cmp(&b.0).unwrap()) {
+            if let Some(r) = rst {
+                if r != "N/A" && r != "Ya reseteado" {
+                    ag_t = format!("🛸AG:{:.0}%({})", min_val, r);
+                } else {
+                    ag_t = format!("🛸AG:{:.0}%", min_val);
+                }
+            } else {
+                ag_t = format!("🛸AG:{:.0}%", min_val);
+            }
+        }
     }
 
-    // Codex
+    // CX
+    let mut cx_t = "CX:N/A".to_string();
     if let Some(ref c) = snapshot.codex.data {
-        let mut codex_strs = Vec::new();
+        let mut parts = Vec::new();
         for acct in &c.accounts {
+            let mut pcts = Vec::new();
             if let Some(ref p) = acct.primary {
-                let pct = p.remaining_percent
-                    .map(|v| format!("{:.0}%", v))
-                    .unwrap_or_else(|| "N/A".to_string());
-                codex_strs.push(format!(" • {}: {}", acct.label, pct));
+                if let Some(rem) = p.remaining_percent { pcts.push(rem); }
+            }
+            if let Some(ref s) = acct.secondary {
+                if let Some(rem) = s.remaining_percent { pcts.push(rem); }
+            }
+            if let Some(min_p) = pcts.into_iter().min_by(|a, b| a.partial_cmp(b).unwrap()) {
+                let lbl = if acct.label.len() >= 2 { &acct.label[..2] } else { &acct.label };
+                parts.push(format!("{}:{:.0}%", lbl, min_p));
             }
         }
-        if !codex_strs.is_empty() {
-            lines.push("Codex:".to_string());
-            lines.extend(codex_strs);
+        if !parts.is_empty() {
+            cx_t = parts.join(" ");
         }
-    } else {
-        lines.push(format!("Codex: {}", snapshot.codex.status));
     }
 
-    // ZAI
+    // ZI
+    let mut zi_t = "ZI:N/A".to_string();
     if let Some(ref z) = snapshot.zai.data {
-        lines.push("Z.AI:".to_string());
-        for l in &z.limits {
-            if l.kind == "coding_5h" {
-                let rst = l.reset_in.as_deref().unwrap_or("-");
-                lines.push(format!(" • Code: {:.0}% ({})", l.remaining_percent, rst));
+        for lim in &z.limits {
+            if lim.kind == "coding_5h" {
+                zi_t = format!("🧠ZI:{:.0}%", lim.remaining_percent);
+                break;
             }
         }
-    } else {
-        lines.push(format!("Z.AI: {}", snapshot.zai.status));
     }
 
-    lines.join("\n")
+    let raw = format!("{} | {} | {}\n(Click para detalles)", ag_t, cx_t, zi_t);
+    if raw.len() > 125 {
+        raw[..125].to_string()
+    } else {
+        raw
+    }
 }

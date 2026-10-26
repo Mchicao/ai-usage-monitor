@@ -89,7 +89,104 @@ fn antigravity_family(label: &str) -> String {
     }
 }
 
+fn fetch_agy_cli() -> Option<AntigravityData> {
+    let mut cmd = std::process::Command::new("agy");
+    cmd.args(["--print", "/usage"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut map: std::collections::BTreeMap<String, QuotaGroup> = std::collections::BTreeMap::new();
+
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split('\t').map(|s| s.trim()).collect();
+        if fields.len() < 3 {
+            continue;
+        }
+        let family_raw = fields[0];
+        let window_raw = fields[1].to_lowercase();
+        let remaining_raw = fields[2];
+        let reset_at = if fields.len() > 3 && !fields[3].is_empty() {
+            Some(fields[3].to_string())
+        } else {
+            None
+        };
+
+        let pct = remaining_raw
+            .trim_end_matches('%')
+            .trim()
+            .parse::<f64>()
+            .ok()?;
+
+        let family = if family_raw.to_lowercase().contains("argon") {
+            "Gemini 4 Argon".to_string()
+        } else if family_raw.to_lowercase().contains("gemini") {
+            "Gemini".to_string()
+        } else if family_raw.to_lowercase().contains("claude") || family_raw.to_lowercase().contains("gpt") {
+            "Claude y GPT".to_string()
+        } else {
+            continue; // Only Gemini, Claude, and Argon!
+        };
+
+        let group = map.entry(family.clone()).or_insert_with(|| QuotaGroup {
+            label: family,
+            remaining_5h_percent: None,
+            reset_5h_at: None,
+            reset_5h_in: None,
+            weekly_remaining_percent: None,
+            reset_weekly_at: None,
+            reset_weekly_in: None,
+            model_count: 0,
+        });
+
+        if window_raw.contains("weekly") {
+            group.weekly_remaining_percent = Some(pct);
+            group.reset_weekly_at = reset_at.clone();
+            group.reset_weekly_in = Some(format_countdown(reset_at.as_deref()));
+        } else if window_raw.contains("five hour") {
+            group.remaining_5h_percent = Some(pct);
+            group.reset_5h_at = reset_at.clone();
+            group.reset_5h_in = Some(format_countdown(reset_at.as_deref()));
+        }
+    }
+
+    if map.is_empty() {
+        return None;
+    }
+
+    let mut groups = Vec::new();
+    if let Some(g) = map.remove("Claude y GPT") { groups.push(g); }
+    if let Some(g) = map.remove("Gemini") { groups.push(g); }
+    if let Some(g) = map.remove("Gemini 4 Argon") { groups.push(g); }
+
+    Some(AntigravityData {
+        timestamp: Utc::now().to_rfc3339(),
+        method: "agy".to_string(),
+        groups,
+        stale: false,
+    })
+}
+
 pub async fn fetch_antigravity_quota(client: &reqwest::Client) -> ServiceResult<AntigravityData> {
+    // 1. Try agy --print /usage first (clean, fast, official groups including Argon)
+    if let Some(data) = fetch_agy_cli() {
+        return ServiceResult {
+            status: "ok".to_string(),
+            data: Some(data),
+            source: Some("agy /usage".to_string()),
+            error: None,
+        };
+    }
+
+    // 2. Fallback: Cloudcode API directly
     let Some(refresh_token) = find_refresh_token() else {
         return ServiceResult {
             status: "error".to_string(),
@@ -111,7 +208,7 @@ pub async fn fetch_antigravity_quota(client: &reqwest::Client) -> ServiceResult<
 
     let grant_type = "refresh_token".to_string();
 
-    // 1. Refresh Access Token
+    // Refresh Access Token
     let token_resp = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[
@@ -154,7 +251,7 @@ pub async fn fetch_antigravity_quota(client: &reqwest::Client) -> ServiceResult<
         };
     };
 
-    // 2. loadCodeAssist -> projectId
+    // loadCodeAssist -> projectId
     let load_body = serde_json::json!({
         "metadata": {
             "ideType": "ANTIGRAVITY"
@@ -177,7 +274,7 @@ pub async fn fetch_antigravity_quota(client: &reqwest::Client) -> ServiceResult<
         }
     }
 
-    // 3. fetchAvailableModels
+    // fetchAvailableModels
     let models_body = if !project_id.is_empty() {
         serde_json::json!({ "project": project_id })
     } else {
@@ -212,11 +309,21 @@ pub async fn fetch_antigravity_quota(client: &reqwest::Client) -> ServiceResult<
         };
     };
 
-    // Grouping logic matching python _normalise_antigravity_groups
+    // Filter strictly to: "Claude y GPT", "Gemini", "Gemini 4 Argon"
     use std::collections::BTreeMap;
-    let mut groups_map: BTreeMap<(String, i64, Option<String>), (QuotaGroup, usize)> = BTreeMap::new();
+    let mut groups_map: BTreeMap<String, QuotaGroup> = BTreeMap::new();
 
     for (m_id, m_data) in models_map {
+        let label_str = m_data
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(m_id);
+
+        let family = antigravity_family(label_str);
+        if family != "Claude y GPT" && family != "Gemini" && family != "Gemini 4 Argon" {
+            continue; // Skip chat_*, tab_*, etc.
+        }
+
         let qi = m_data.get("quotaInfo");
         let remaining_frac = qi.and_then(|q| q.get("remainingFraction")).and_then(|v| v.as_f64());
         let reset_time = qi
@@ -234,36 +341,34 @@ pub async fn fetch_antigravity_quota(client: &reqwest::Client) -> ServiceResult<
             continue;
         }
 
-        let label_str = m_data
-            .get("displayName")
-            .and_then(|v| v.as_str())
-            .unwrap_or(m_id);
+        let pct = (remaining * 100.0 * 10.0).round() / 10.0;
 
-        let family = antigravity_family(label_str);
-        let rem_rounded = (remaining * 1000000.0).round() as i64;
-        let key = (family.clone(), rem_rounded, reset_time.clone());
-
-        let entry = groups_map.entry(key).or_insert_with(|| {
-            let pct = (remaining * 100.0 * 10.0).round() / 10.0;
-            (
-                QuotaGroup {
-                    label: family,
-                    remaining_5h_percent: Some(pct),
-                    reset_5h_at: reset_time.clone(),
-                    reset_5h_in: Some(format_countdown(reset_time.as_deref())),
-                    weekly_remaining_percent: None,
-                    reset_weekly_at: None,
-                    reset_weekly_in: None,
-                    model_count: 0,
-                },
-                0,
-            )
+        let group = groups_map.entry(family.clone()).or_insert_with(|| QuotaGroup {
+            label: family,
+            remaining_5h_percent: Some(pct),
+            reset_5h_at: reset_time.clone(),
+            reset_5h_in: Some(format_countdown(reset_time.as_deref())),
+            weekly_remaining_percent: None,
+            reset_weekly_at: None,
+            reset_weekly_in: None,
+            model_count: 0,
         });
-        entry.1 += 1;
-        entry.0.model_count = entry.1;
+
+        group.model_count += 1;
+        // Keep lowest remaining
+        if let Some(current) = group.remaining_5h_percent {
+            if pct < current {
+                group.remaining_5h_percent = Some(pct);
+                group.reset_5h_at = reset_time.clone();
+                group.reset_5h_in = Some(format_countdown(reset_time.as_deref()));
+            }
+        }
     }
 
-    let groups: Vec<QuotaGroup> = groups_map.into_values().map(|(g, _)| g).collect();
+    let mut groups = Vec::new();
+    if let Some(g) = groups_map.remove("Claude y GPT") { groups.push(g); }
+    if let Some(g) = groups_map.remove("Gemini") { groups.push(g); }
+    if let Some(g) = groups_map.remove("Gemini 4 Argon") { groups.push(g); }
 
     ServiceResult {
         status: "ok".to_string(),
