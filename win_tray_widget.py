@@ -22,7 +22,7 @@ import ctypes
 
 import customtkinter as ctk
 import pystray
-from ai_quota_widget import _ts_to_countdown, codex_windows_with_data, collect_all_quotas
+from ai_quota_widget import _format_local_datetime, _ts_to_countdown, codex_windows_with_data, collect_all_quotas, zai_popup_data
 from PIL import Image, ImageDraw
 
 # ─── Configuración ───
@@ -196,7 +196,6 @@ class FluentPopup(ctk.CTkToplevel):
         sh = self.winfo_screenheight()
         try:
             import ctypes
-            from ctypes import wintypes
 
             class _RECT(ctypes.Structure):
                 _fields_ = [
@@ -418,6 +417,11 @@ class FluentPopup(ctk.CTkToplevel):
                 resets_text = f"🔄 {avail} resets disponibles"
             else:
                 resets_text = "🔄 Sin resets disponibles"
+            credits = reset_credits.get("credits") or []
+            if avail > 0 and credits:
+                resets_text = f"🔄 {avail} resets disponibles\n" + "\n".join(
+                    f"- Reset {_format_local_datetime(credit.get('expires_at'))}" for credit in credits
+                )
             if account.get("status") == "error":
                 resets_text = ""
 
@@ -514,17 +518,7 @@ class FluentPopup(ctk.CTkToplevel):
             resets_lbl.grid(row=2 + len(windows), column=0, padx=12, pady=(0, 8), sticky="w")
 
     def _get_zi_data(self):
-        d = self.data.get("zai", {})
-        if d.get("status") != "ok":
-            return None
-        level = (d.get("data") or {}).get("level", "?").upper()
-        for lim in (d.get("data") or {}).get("limits", []):
-            if lim.get("kind") == "coding_5h":
-                return {
-                    "pct": lim.get("remaining_percent", 0),
-                    "subtitle": f"{level} · Reset: {lim.get('reset_in', 'N/A')}",
-                }
-        return {"pct": None, "subtitle": level}
+        return zai_popup_data(self.data.get("zai", {}))
 
     def _open_web(self):
         close_popup()

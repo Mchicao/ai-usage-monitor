@@ -1,12 +1,14 @@
 #![windows_subsystem = "windows"]
 
 mod antigravity;
+mod auto_reset;
 mod codex;
 mod game_mode;
 mod models;
 mod popup;
 mod tray;
 mod zai;
+mod zcode_session;
 
 use std::env;
 use std::fs;
@@ -28,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WM_TRAY: u32 = WM_USER + 20;
 const WM_APPLY_SNAPSHOT: u32 = WM_USER + 21;
+const WM_AUTO_RESET_SNAPSHOT: u32 = WM_USER + 22;
 const ID_TRAY: u32 = 1001;
 
 const IDM_SHOW_POPUP: usize = 2001;
@@ -209,12 +212,14 @@ fn trigger_async_quota_collection() {
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         match msg {
-            WM_APPLY_SNAPSHOT => {
+            WM_APPLY_SNAPSHOT | WM_AUTO_RESET_SNAPSHOT => {
                 log_debug("WM_APPLY_SNAPSHOT received");
                 let raw_ptr = wparam.0 as *mut AllQuotasSnapshot;
                 if !raw_ptr.is_null() {
                     let snapshot = *Box::from_raw(raw_ptr);
-                    IS_UPDATING.store(false, Ordering::SeqCst);
+                    if msg == WM_APPLY_SNAPSHOT {
+                        IS_UPDATING.store(false, Ordering::SeqCst);
+                    }
 
                     write_snapshot(&snapshot);
                     log_debug("Snapshot written to disk");
@@ -376,6 +381,19 @@ fn main() {
         .build()
         .expect("Failed to build HTTP client");
 
+    if args.iter().any(|arg| arg == "--check-reset-access") {
+        attach_parent_console();
+        match rt.block_on(auto_reset::check_access()) {
+            Ok(count) => {
+                log_debug(&format!("Acceso Codex verificado: {} resets disponibles; comprobación de solo lectura", count));
+                println!("Acceso Codex verificado: {} resets disponibles. No se canjeó ninguno.", count);
+            }
+            Err(error) => { log_debug(&format!("Error verificando acceso Codex: {}", error)); eprintln!("{}", error); std::process::exit(1); }
+        }
+        return;
+    }
+    auto_reset::ENABLED.store(args.iter().any(|arg| arg == "--auto-redeem-resets"), Ordering::Relaxed);
+
     // CLI mode: --json
     if args.iter().any(|a| a == "--json") {
         attach_parent_console();
@@ -410,7 +428,7 @@ fn main() {
         println!("Status: {}", snapshot.zai.status);
         if let Some(ref d) = snapshot.zai.data {
             for l in &d.limits {
-                println!(" - {}: rem={}% (reset: {:?})", l.kind, l.remaining_percent, l.reset_in);
+                println!(" - {}: rem={:?}% (reset: {:?})", l.kind, l.remaining_percent, l.reset_in);
             }
         }
         return;
@@ -488,6 +506,8 @@ fn main() {
         let initial_hicon = tray::create_default_icon();
         log_debug(&format!("initial_hicon: is_some={}", initial_hicon.is_some()));
 
+        let auto_client = client.clone();
+        let auto_shared = shared_snapshot.clone();
         APP_STATE = Some(AppState {
             hwnd_usize: hwnd.0 as usize,
             current_hicon: initial_hicon,
@@ -517,6 +537,35 @@ fn main() {
 
         let res = Shell_NotifyIconW(NIM_ADD, &mut nid);
         log_debug(&format!("Shell_NotifyIconW NIM_ADD result: {:?}", res));
+
+        if auto_reset::ENABLED.load(Ordering::Relaxed) {
+            let shared = auto_shared;
+            let client = auto_client;
+            let hwnd_raw = hwnd.0 as usize;
+            rt.spawn(async move {
+                let mut timer = tokio::time::interval(Duration::from_secs(60));
+                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    timer.tick().await;
+                    let snapshot = shared.read().await.clone();
+                    let Some(mut snapshot) = snapshot else { continue; };
+                    let codex = auto_reset::redeem_due(&snapshot).await;
+                    let zai = zai::redeem_due(&client, &snapshot.zai).await;
+                    if let Err(error) = &codex { log_debug(&format!("Canje automático Codex pendiente: {}", error)); }
+                    if let Err(error) = &zai { log_debug(&format!("Canje automático Z.AI pendiente: {}", error)); }
+                    let codex_changed = matches!(codex, Ok(true));
+                    let zai_changed = matches!(zai, Ok(true));
+                    if codex_changed { snapshot.codex = codex::fetch_codex_quota(&client).await; }
+                    if zai_changed { snapshot.zai = zai::fetch_zai_quota(&client).await; }
+                    if codex_changed || zai_changed {
+                        log_debug("Canje automático confirmado; cuotas actualizadas");
+                        snapshot.timestamp = Utc::now().to_rfc3339();
+                        let raw = Box::into_raw(Box::new(snapshot)) as usize;
+                        let _ = PostMessageW(HWND(hwnd_raw as *mut _), WM_AUTO_RESET_SNAPSHOT, WPARAM(raw), LPARAM(0));
+                    }
+                }
+            });
+        }
 
         // Periodic timer: update quotas every 120 seconds
         SetTimer(hwnd, 1, 120_000, None);

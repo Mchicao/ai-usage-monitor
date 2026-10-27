@@ -1,0 +1,373 @@
+{
+  "StartedUtc": "2026-10-27T15:44:51.2037690+00:00",
+  "EndedUtc": "2026-10-27T15:45:06.2972951+00:00",
+  "LogicalProcessors": 8,
+  "SamplesPerVersion": 16,
+  "RustAutoRedeemEnabled": true,
+  "Summary": [
+    {
+      "Version": "Python",
+      "ProcessIds": [
+        14912,
+        24456
+      ],
+      "DurationSeconds": 14.9861322,
+      "WorkingSetAvgMB": 69.296875,
+      "WorkingSetMinMB": 69.296875,
+      "WorkingSetMaxMB": 69.296875,
+      "WorkingSetEndMB": 69.296875,
+      "PrivateAvgMB": 37.18359375,
+      "PrivateMinMB": 37.18359375,
+      "PrivateMaxMB": 37.18359375,
+      "PrivateEndMB": 37.18359375,
+      "ThreadsEnd": 12,
+      "ThreadsPeak": 12.0,
+      "CpuAccumulatedSeconds": 14.859375,
+      "CpuDeltaSeconds": 0.203125,
+      "CpuAveragePercent": 0.1694274724201352,
+      "CpuPeakPercent": 0.4012806876356134,
+      "MainUptimeMinutes": 10.348262223333334
+    },
+    {
+      "Version": "Rust",
+      "ProcessIds": [
+        16972
+      ],
+      "DurationSeconds": 14.9761612,
+      "WorkingSetAvgMB": 22.30810546875,
+      "WorkingSetMinMB": 22.30078125,
+      "WorkingSetMaxMB": 22.30859375,
+      "WorkingSetEndMB": 22.30078125,
+      "PrivateAvgMB": 4.6748046875,
+      "PrivateMinMB": 4.66015625,
+      "PrivateMaxMB": 4.67578125,
+      "PrivateEndMB": 4.66015625,
+      "ThreadsEnd": 12,
+      "ThreadsPeak": 12.0,
+      "CpuAccumulatedSeconds": 1.1875,
+      "CpuDeltaSeconds": 0.0,
+      "CpuAveragePercent": 0.0,
+      "CpuPeakPercent": 0.0,
+      "MainUptimeMinutes": 8.61412613
+    }
+  ],
+  "ProcessBreakdown": [
+    {
+      "Version": "Python",
+      "Id": 14912,
+      "Role": "principal",
+      "WorkingSetMB": 63.08984375,
+      "PrivateMemoryMB": 36.19921875,
+      "Threads": 10,
+      "CpuSeconds": 14.78125
+    },
+    {
+      "Version": "Python",
+      "Id": 24456,
+      "Role": "lanzador",
+      "WorkingSetMB": 6.20703125,
+      "PrivateMemoryMB": 0.984375,
+      "Threads": 2,
+      "CpuSeconds": 0.078125
+    },
+    {
+      "Version": "Rust",
+      "Id": 16972,
+      "Role": "principal",
+      "WorkingSetMB": 22.30078125,
+      "PrivateMemoryMB": 4.66015625,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    }
+  ],
+  "Samples": [
+    {
+      "Index": 0,
+      "ElapsedSeconds": 0.0266901,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.65625
+    },
+    {
+      "Index": 0,
+      "ElapsedSeconds": 0.0390824,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 1,
+      "ElapsedSeconds": 1.0494305,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.671875
+    },
+    {
+      "Index": 1,
+      "ElapsedSeconds": 1.0528841,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 2,
+      "ElapsedSeconds": 2.0056601,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.671875
+    },
+    {
+      "Index": 2,
+      "ElapsedSeconds": 2.0080563,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 3,
+      "ElapsedSeconds": 3.0124575,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.6875
+    },
+    {
+      "Index": 3,
+      "ElapsedSeconds": 3.0149676,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 4,
+      "ElapsedSeconds": 4.004342,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.703125
+    },
+    {
+      "Index": 4,
+      "ElapsedSeconds": 4.0066573,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 5,
+      "ElapsedSeconds": 5.0131543,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.703125
+    },
+    {
+      "Index": 5,
+      "ElapsedSeconds": 5.0155095,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 6,
+      "ElapsedSeconds": 6.0047255,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.71875
+    },
+    {
+      "Index": 6,
+      "ElapsedSeconds": 6.0071095,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 7,
+      "ElapsedSeconds": 7.0134572,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.71875
+    },
+    {
+      "Index": 7,
+      "ElapsedSeconds": 7.0157504,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 8,
+      "ElapsedSeconds": 8.0051872,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.734375
+    },
+    {
+      "Index": 8,
+      "ElapsedSeconds": 8.0076536,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 9,
+      "ElapsedSeconds": 9.0311766,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.75
+    },
+    {
+      "Index": 9,
+      "ElapsedSeconds": 9.0350753,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 10,
+      "ElapsedSeconds": 10.0046224,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.78125
+    },
+    {
+      "Index": 10,
+      "ElapsedSeconds": 10.0070468,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 11,
+      "ElapsedSeconds": 11.0139704,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.8125
+    },
+    {
+      "Index": 11,
+      "ElapsedSeconds": 11.0161967,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 12,
+      "ElapsedSeconds": 12.0053563,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.828125
+    },
+    {
+      "Index": 12,
+      "ElapsedSeconds": 12.0086937,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 13,
+      "ElapsedSeconds": 13.0116377,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.828125
+    },
+    {
+      "Index": 13,
+      "ElapsedSeconds": 13.0137376,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 14,
+      "ElapsedSeconds": 14.0105441,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.84375
+    },
+    {
+      "Index": 14,
+      "ElapsedSeconds": 14.0126292,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30859375,
+      "PrivateMemoryMB": 4.67578125,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    },
+    {
+      "Index": 15,
+      "ElapsedSeconds": 15.0128223,
+      "Version": "Python",
+      "WorkingSetMB": 69.296875,
+      "PrivateMemoryMB": 37.18359375,
+      "Threads": 12,
+      "CpuSeconds": 14.859375
+    },
+    {
+      "Index": 15,
+      "ElapsedSeconds": 15.0152436,
+      "Version": "Rust",
+      "WorkingSetMB": 22.30078125,
+      "PrivateMemoryMB": 4.66015625,
+      "Threads": 12,
+      "CpuSeconds": 1.1875
+    }
+  ]
+}

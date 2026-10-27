@@ -11,6 +11,24 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::models::AllQuotasSnapshot;
 
+fn reset_lines(credits: &crate::models::ResetCredits) -> Vec<String> {
+    let mut lines = credits.display_lines();
+    lines.push(crate::auto_reset::display_status().to_owned());
+    lines
+}
+
+fn zai_lines(result: &crate::models::ServiceResult<crate::models::ZaiData>) -> Vec<String> {
+    let mut lines = result.data.as_ref().map(|data| data.display_lines()).unwrap_or_default();
+    if let Some(error) = result.error.as_ref() { lines.insert(0, error.clone()); }
+    if lines.is_empty() { lines.push("Cuota Z.AI no disponible".into()); }
+    if crate::auto_reset::ENABLED.load(Ordering::Relaxed) { lines.push(crate::zai::auto_reset_status().into()); }
+    lines
+}
+
+fn zai_height(result: &crate::models::ServiceResult<crate::models::ZaiData>) -> i32 {
+    (44 + zai_lines(result).len() as i32 * 18).max(100)
+}
+
 static POPUP_HWND: AtomicUsize = AtomicUsize::new(0);
 static POPUP_SNAPSHOT: Mutex<Option<AllQuotasSnapshot>> = Mutex::new(None);
 
@@ -182,16 +200,14 @@ fn calculate_content_height() -> i32 {
             if let Some(ref s) = acct.secondary {
                 if s.remaining_percent.is_some() { num_windows += 1; }
             }
-            let has_resets = acct.reset_credits.is_some();
-            let credits_extra = if has_resets { 18 } else { 0 };
+            let credits_extra = acct.reset_credits.as_ref()
+                .map(|credits| reset_lines(credits).len() as i32 * 18).unwrap_or(0);
             h += 44 + num_windows * 30 + 20 + credits_extra + 8;
         }
     }
 
     // ZAI card
-    if snap.zai.data.is_some() {
-        h += 70;
-    }
+    h += zai_height(&snap.zai) + 8;
 
     h += 16;
     h.clamp(320, 750)
@@ -476,8 +492,8 @@ unsafe fn render_popup_ui(hdc: HDC, total_w: i32, total_h: i32) {
                     }
                 }
 
-                let has_resets = acct.reset_credits.is_some();
-                let credits_extra = if has_resets { 18 } else { 0 };
+                let credits_extra = acct.reset_credits.as_ref()
+                    .map(|credits| reset_lines(credits).len() as i32 * 18).unwrap_or(0);
                 let card_h = 44 + (windows.len() as i32) * 30 + 20 + credits_extra;
                 draw_rounded_card(hdc, card_x, cur_y, card_w, card_h, COLOR_CARD);
 
@@ -540,18 +556,13 @@ unsafe fn render_popup_ui(hdc: HDC, total_w: i32, total_h: i32) {
                 // Reset credits
                 if let Some(ref rc) = acct.reset_credits {
                     let avail = rc.available_count.unwrap_or(0);
-                    let (credits_text, credits_color) = if avail > 0 {
-                        (format!("🔄 {} resets disponibles", avail), COLOR_ACCENT)
-                    } else {
-                        ("🔄 Sin resets disponibles".to_string(), COLOR_MUTED)
-                    };
-                    let _ = SetTextColor(hdc, COLORREF(credits_color));
-                    draw_text_helper(
-                        hdc,
-                        &credits_text,
-                        RECT { left: card_x + 12, top: win_y + 18, right: card_x + card_w - 12, bottom: win_y + 34 },
-                        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                    );
+                    let _ = SetTextColor(hdc, COLORREF(if avail > 0 { COLOR_ACCENT } else { COLOR_MUTED }));
+                    for (index, line) in reset_lines(rc).iter().enumerate() {
+                        let line_y = win_y + 18 + index as i32 * 18;
+                        draw_text_helper(hdc, line,
+                            RECT { left: card_x + 12, top: line_y, right: card_x + card_w - 12, bottom: line_y + 16 },
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    }
                 }
 
                 cur_y += card_h + 8;
@@ -559,8 +570,9 @@ unsafe fn render_popup_ui(hdc: HDC, total_w: i32, total_h: i32) {
         }
 
         // 4. Z.AI Card
-        if let Some(ref z) = snap.zai.data {
-            let card_h = 62;
+        {
+            let z = snap.zai.data.as_ref();
+            let card_h = zai_height(&snap.zai);
             draw_rounded_card(hdc, card_x, cur_y, card_w, card_h, COLOR_CARD);
 
             // Title: "🧠 Z.AI Coding Plan"
@@ -573,8 +585,8 @@ unsafe fn render_popup_ui(hdc: HDC, total_w: i32, total_h: i32) {
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
 
-            let coding_lim = z.limits.iter().find(|l| l.kind == "coding_5h");
-            let pct = coding_lim.map(|l| l.remaining_percent);
+            let coding_lim = z.and_then(|z| z.limits.iter().find(|l| l.kind == "coding_5h"));
+            let pct = coding_lim.and_then(|l| l.remaining_percent);
 
             // Pct
             let _ = SelectObject(hdc, font_pct);
@@ -590,17 +602,14 @@ unsafe fn render_popup_ui(hdc: HDC, total_w: i32, total_h: i32) {
             // Progress bar
             draw_progress_bar(hdc, card_x + 12, cur_y + 30, card_w - 24, 6, pct);
 
-            // Subtitle: "LITE · Reset: 3h 10m"
-            let level = z.level.as_deref().unwrap_or("?").to_uppercase();
-            let rst = coding_lim.and_then(|l| l.reset_in.as_deref()).unwrap_or("N/A");
-            let sub_text = format!("{} · Reset: {}", level, rst);
+            let sub_text = zai_lines(&snap.zai).join("\n");
             let _ = SelectObject(hdc, font_sub);
             let _ = SetTextColor(hdc, COLORREF(COLOR_MUTED));
             draw_text_helper(
                 hdc,
                 &sub_text,
-                RECT { left: card_x + 12, top: cur_y + 40, right: card_x + card_w - 12, bottom: cur_y + 56 },
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                RECT { left: card_x + 12, top: cur_y + 40, right: card_x + card_w - 12, bottom: cur_y + card_h - 6 },
+                DT_LEFT | DT_WORDBREAK,
             );
         }
 

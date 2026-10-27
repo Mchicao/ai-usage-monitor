@@ -116,7 +116,7 @@ pub fn create_tray_hicon(snapshot: &AllQuotasSnapshot) -> Option<HICON> {
     if let Some(ref z) = snapshot.zai.data {
         for lim in &z.limits {
             if lim.kind == "coding_5h" {
-                zai_pct = Some(lim.remaining_percent);
+                zai_pct = lim.remaining_percent;
                 break;
             }
         }
@@ -216,7 +216,9 @@ pub fn create_tooltip(snapshot: &AllQuotasSnapshot) -> String {
     if let Some(ref z) = snapshot.zai.data {
         for lim in &z.limits {
             if lim.kind == "coding_5h" {
-                zi_t = format!("🧠ZI:{:.0}%", lim.remaining_percent);
+                if let Some(remaining) = lim.remaining_percent {
+                    zi_t = format!("🧠ZI:{:.0}%", remaining);
+                }
                 break;
             }
         }

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Memoria de los monitores</title>
+<style>
+:root { color-scheme: light dark; }
+html,body { margin:0; padding:0; background:transparent; color:var(--foreground); font-family:var(--font-sans); }
+#monitor-memory { font-size:14px; }
+h2 { font-size:17px; font-weight:500; margin:0 0 6px; }
+.context { color:var(--muted-foreground); margin:0 0 20px; font-size:12px; }
+.panels { display:grid; grid-template-columns:1fr 1fr; gap:26px; }
+h3 { margin:0 0 16px; font-size:14px; font-weight:500; }
+.row { display:grid; grid-template-columns:57px minmax(0,1fr) 66px; gap:10px; align-items:center; margin:0 0 15px; }
+.track { height:20px; background:var(--secondary); }
+.bar { height:100%; }
+.python { background:var(--chart-1); }
+.rust { background:var(--chart-2); }
+.value { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.axis { margin:0 76px 0 67px; display:flex; justify-content:space-between; font-size:12px; color:var(--muted-foreground); }
+.foot { font-size:12px; color:var(--muted-foreground); margin:16px 0 0; }
+@media(max-width:520px) { .panels { grid-template-columns:1fr; gap:24px; } }
+</style>
+</head>
+<body>
+<section id="monitor-memory" aria-labelledby="memory-title">
+  <h2 id="memory-title">Memoria promedio durante 15 segundos</h2>
+  <p class="context">16 muestras por versión · Python incluye el lanzador · Escala común de 0 a 80 MB</p>
+  <div class="panels">
+    <section aria-label="Memoria residente: Python 69,30 MB; Rust 22,31 MB">
+      <h3>Memoria residente · Working Set</h3>
+      <div class="row"><span>Python</span><div class="track"><div class="bar python" style="width:86.621094%"></div></div><span class="value">69,30 MB</span></div>
+      <div class="row"><span>Rust</span><div class="track"><div class="bar rust" style="width:27.885132%"></div></div><span class="value">22,31 MB</span></div>
+      <div class="axis" aria-hidden="true"><span>0</span><span>40</span><span>80 MB</span></div>
+    </section>
+    <section aria-label="Memoria privada comprometida: Python 37,18 MB; Rust 4,67 MB">
+      <h3>Memoria privada comprometida</h3>
+      <div class="row"><span>Python</span><div class="track"><div class="bar python" style="width:46.479492%"></div></div><span class="value">37,18 MB</span></div>
+      <div class="row"><span>Rust</span><div class="track"><div class="bar rust" style="width:5.843506%"></div></div><span class="value">4,67 MB</span></div>
+      <div class="axis" aria-hidden="true"><span>0</span><span>40</span><span>80 MB</span></div>
+    </section>
+  </div>
+  <p class="foot">Valores calculados como bytes / 1024². Working Set incluye páginas compartidas; la memoria privada comprometida puede no estar toda residente.</p>
+</section>
+</body>
+</html>

@@ -26,6 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from scripts.utils.zcode_session import read_zcode_session
 from datetime import datetime, timezone
 
 # ─── Configuración ───
@@ -604,6 +605,22 @@ def _codex_min_remaining(account: dict) -> float:
     return min(pcts) if pcts else float("inf")
 
 
+def _format_local_datetime(timestamp) -> str:
+    """Fecha y hora del sistema con offset explícito, también en cambios de horario."""
+    try:
+        if isinstance(timestamp, (int, float)):
+            value = datetime.fromtimestamp(timestamp, timezone.utc)
+        else:
+            value = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            return "Hora no disponible"
+        local = value.astimezone()
+        offset = local.strftime("%z")
+        return f"{local:%d/%m %H:%M} UTC{offset[:3]}:{offset[3:]}"
+    except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+        return "Hora no disponible"
+
+
 def _normalise_codex_resets(
     reset_credits_payload: dict | None,
     fallback_data: dict | None = None,
@@ -627,6 +644,8 @@ def _normalise_codex_resets(
             if exp_str:
                 try:
                     exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+                    if exp_dt.tzinfo is None:
+                        exp_dt = None
                 except Exception:
                     pass
             countdown = "N/A"
@@ -647,7 +666,7 @@ def _normalise_codex_resets(
                         countdown = f"{days}d {hours}h"
                     else:
                         countdown = f"{hours}h {mins}m"
-                date_str = f"{exp_dt.day:02d}/{exp_dt.month:02d}"
+                date_str = _format_local_datetime(exp_str)
 
             if not is_expired:
                 credits_list.append({
@@ -660,7 +679,8 @@ def _normalise_codex_resets(
 
     if credits_list:
         credits_list.sort(key=lambda x: x["exp_dt"] or datetime.max.replace(tzinfo=timezone.utc))
-        avail = len(credits_list)
+        if not reset_credits_payload or reset_credits_payload.get("available_count") is None:
+            avail = len(credits_list)
 
     if avail == 0:
         summary = "Sin resets disponibles"
@@ -669,28 +689,7 @@ def _normalise_codex_resets(
         summary = f"{avail} disponibles" if avail > 1 else f"{avail} disponible"
         short_summary = f"{avail} disp."
     else:
-        from collections import OrderedDict
-
-        by_date = OrderedDict()
-        for c in credits_list:
-            d = c["date"]
-            if d not in by_date:
-                by_date[d] = []
-            by_date[d].append(c)
-
-        parts = []
-        is_first = True
-        for d, items in by_date.items():
-            count = len(items)
-            first_countdown = items[0]["countdown"]
-            if is_first:
-                if count > 1:
-                    parts.append(f"{count} el {d} ({first_countdown})")
-                else:
-                    parts.append(f"1 el {d} ({first_countdown})")
-                is_first = False
-            else:
-                parts.append(f"{count} el {d}")
+        parts = [f"Reset {credit['date']} ({credit['countdown']})" for credit in credits_list]
         summary = " · ".join(parts)
         short_summary = f"{avail} disp. ({parts[0]})"
 
@@ -890,57 +889,172 @@ def get_codex_quota_from_sessions() -> dict:
 # ═══════════════════════════════════════════════════════
 
 
+def _read_zai_api_key() -> str:
+    """Reutiliza credenciales locales de Z.AI; no las imprime ni las persiste."""
+    key = os.environ.get("ZAI_API_KEY") or os.environ.get("GLM_API_KEY")
+    if key and key.strip():
+        return key.strip()
+    path = os.environ.get("ZAI_API_KEY_FILE", OPENCODE_AUTH_FILE)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            provider = json.load(handle).get("zai-coding-plan") or {}
+        key = provider.get("key")
+        if isinstance(key, str) and key.strip():
+            return key.strip()
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        response = _run_quota_command(["opencode", "auth", "export", "zai-coding-plan"])
+        if response.returncode == 0:
+            for account in json.loads(response.stdout):
+                key = (account.get("value") or {}).get("key")
+                if isinstance(key, str) and key.strip():
+                    return key.strip()
+    except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+def _normalise_zai_response(body: dict) -> dict:
+    """HTTP 200 puede contener un rechazo; exigir límites antes de declarar éxito."""
+    if body.get("success") is False:
+        code = body.get("code")
+        code = str(code) if isinstance(code, (int, float)) else "desconocido"
+        return {"status": "error", "error": f"Z.AI rechazó la consulta (código {code}). Revisa tu autenticación."}
+    data = body.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("limits"), list) or not data["limits"]:
+        return {"status": "error", "error": "Z.AI no devolvió límites de Coding Plan."}
+    return {"status": "ok", "data": {
+        "level": data.get("level") or "Coding Plan",
+        "limits": _normalise_zai_limits(data["limits"]),
+        "email": None,
+    }}
+
+
+def _zai_request(url: str, headers: dict) -> dict:
+    request = urllib.request.Request(url, headers={"Accept": "application/json", **headers})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = json.load(response)
+    if not isinstance(body, dict):
+        raise ValueError("Respuesta Z.AI no válida")
+    return body
+
+
+def _normalise_zai_resets(body: dict) -> dict:
+    data = body.get("data")
+    if type(body.get("code")) is not int or body["code"] != 0 or not isinstance(data, dict):
+        return {"status": "error", "error": "No se pudieron consultar las tarjetas Z.AI."}
+    credits = []
+    for field, kind in (("available_five_hour_resets", "coding_5h"), ("available_week_resets", "coding_weekly")):
+        items = data.get(field)
+        if not isinstance(items, list):
+            return {"status": "error", "error": "Z.AI devolvió un inventario de tarjetas no válido."}
+        for item in items:
+            expiry = item.get("expire_at") if isinstance(item, dict) else None
+            if type(expiry) not in (int, float) or expiry <= 0:
+                return {"status": "error", "error": "Z.AI devolvió un vencimiento no válido."}
+            if expiry > time.time() * 1000:
+                credits.append({"kind": kind, "expires_at": datetime.fromtimestamp(expiry / 1000, timezone.utc).isoformat()})
+    credits.sort(key=lambda credit: credit["expires_at"])
+    return {"status": "ok", "available_count": len(credits), "credits": credits}
+
+
+def _get_zcode_zai_quota(session: dict) -> dict:
+    """Cuota y tarjetas conservan sus errores por separado y usan la misma sesión."""
+    try:
+        result = _normalise_zai_response(_zai_request(
+            "https://api.z.ai/api/monitor/usage/quota/limit", {"Authorization": session["platform_token"]}))
+    except (OSError, ValueError, TypeError):
+        result = {"status": "error", "error": "No se pudo consultar la cuota Z.AI con ZCode."}
+    data = result.setdefault("data", {"level": "Coding Plan", "limits": []})
+    data["email"] = session.get("email")
+    resets = {"status": "error", "error": "Falta la sesión ZCode para consultar tarjetas."}
+    if session.get("zcode_token"):
+        token = session["zcode_token"]
+        try:
+            resets = _normalise_zai_resets(_zai_request("https://zcode.z.ai/api/v1/coding-plan/reset/status", {
+                "Authorization": token if token.lower().startswith("bearer ") else f"Bearer {token}",
+                "X-Bigmodel-Authorization": session["platform_token"],
+                "Bigmodel-Target-Type": "PERSONAL",
+            }))
+        except (OSError, ValueError, TypeError):
+            resets = {"status": "error", "error": "No se pudo consultar el inventario de tarjetas Z.AI."}
+    data["reset_credits"] = resets
+    result["source"] = "ZCode"
+    return result
+
+
+def zai_popup_data(result: dict) -> dict:
+    """Presenta cuotas y vencimientos agrupando tarjetas idénticas sin ocultar errores."""
+    from collections import Counter
+
+    data = result.get("data") or {}
+    limits = data.get("limits") or []
+    coding = next((limit for limit in limits if limit.get("kind") == "coding_5h"), {})
+    lines = [(data.get("level") or "Coding Plan").upper()]
+    if result.get("status") != "ok":
+        lines.append(result.get("error") or "Cuota Z.AI no disponible")
+    for limit in limits:
+        if limit.get("kind") == "mcp_tools" and limit.get("remaining_percent") is not None:
+            lines.append(f"MCP: {limit['remaining_percent']:.0f}% restante")
+        if limit.get("kind") == "coding_weekly" and limit.get("remaining_percent") is not None:
+            lines.append(f"7d: {limit['remaining_percent']:.0f}% restante")
+            if limit.get("reset_at"):
+                lines.append(f"Reinicio 7d: {_format_local_datetime(limit['reset_at'])}")
+    if coding:
+        lines.append(f"Reinicio 5h: {_format_local_datetime(coding['reset_at'])}" if coding.get("reset_at") else "Reinicio 5h: no informado")
+    resets = data.get("reset_credits") or {}
+    if resets.get("status") == "ok":
+        credits = resets.get("credits") or []
+        lines.append(f"{len(credits)} resets manuales")
+        groups = Counter((credit["expires_at"], credit["kind"]) for credit in credits)
+        for (expires, kind), count in sorted(groups.items()):
+            window = "5h" if kind == "coding_5h" else "7d"
+            lines.append(f"{count} × Reset {window} {_format_local_datetime(expires)}")
+    else:
+        lines.append(resets.get("error") or "Tarjetas: sesión ZCode no disponible")
+    return {"pct": coding.get("remaining_percent"), "subtitle": "\n".join(lines)}
+
+
 def get_zai_quota() -> dict:
     """
     Obtiene la cuota REAL de Z.AI Coding Plan desde la API interna.
     Endpoint: GET https://api.z.ai/api/monitor/usage/quota/limit
-    Requiere: platform JWT + bigmodel-organization + bigmodel-project headers.
-    El JWT se extrae del navegador (Thorium Local Storage).
+    Prefiere la sesión ZCode; conserva fuentes explícitas cuando no está instalada.
     """
     import urllib.error
     import urllib.request
 
-    # Leer el platform token
-    token_path = os.path.expanduser("~/AppData/Local/hermes/.zai_platform_token.txt")
-    if not os.path.exists(token_path):
-        return {
-            "status": "error",
-            "error": "No hay platform token de Z.AI",
-            "hint": "Ejecuta extract_zai_cookies.py o abre z.ai en tu navegador",
-        }
-
-    with open(token_path) as f:
-        token = f.read().strip()
-    email = _local_zai_email()
-
-    # Valores por defecto de org/project (extraídos de la cuenta del usuario)
-    org = "org-2363d4ce091a445D936A7D3B5EB0C57C"
-    proj = "proj_F7F3eC68baF047658a790bcAA12B68d4"
-
+    try:
+        session = read_zcode_session()
+    except ValueError as error:
+        return {"status": "error", "error": str(error)}
+    if session:
+        return _get_zcode_zai_quota(session)
+    api_key = _read_zai_api_key()
+    token = os.environ.get("ZAI_PLATFORM_TOKEN", "").strip()
+    if not api_key and not token:
+        token_path = os.environ.get("ZAI_PLATFORM_TOKEN_FILE", os.path.expanduser("~/AppData/Local/hermes/.zai_platform_token.txt"))
+        try:
+            with open(token_path, encoding="utf-8") as handle:
+                token = handle.read().strip()
+        except OSError:
+            pass
+    if not api_key and not token:
+        return {"status": "error", "error": "Falta autenticación de Z.AI. Configura ZAI_API_KEY o inicia sesión en OpenCode."}
     url = "https://api.z.ai/api/monitor/usage/quota/limit"
     req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("bigmodel-organization", org)
-    req.add_header("bigmodel-project", proj)
+    req.add_header("Authorization", api_key or f"Bearer {token}")
+    if not api_key:
+        for name, env in (("bigmodel-organization", "ZAI_ORG_ID"), ("bigmodel-project", "ZAI_PROJECT_ID")):
+            if os.environ.get(env):
+                req.add_header(name, os.environ[env])
     req.add_header("Accept", "application/json")
 
     try:
-        resp = urllib.request.urlopen(req, timeout=15)
-        body = json.loads(resp.read())
-        data = body.get("data", {})
-        limits = data.get("limits", [])
-        level = data.get("level", "unknown")
-
-        result_limits = _normalise_zai_limits(limits)
-
-        return {
-            "status": "ok",
-            "data": {
-                "level": level,
-                "limits": result_limits,
-                "email": email,
-            },
-        }
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.load(resp)
+        return _normalise_zai_response(body)
     except urllib.error.HTTPError as e:
         if e.code == 401:
             return {
@@ -948,9 +1062,9 @@ def get_zai_quota() -> dict:
                 "error": "Token expirado",
                 "hint": "Abre z.ai en tu navegador y ejecuta extract_zai_cookies.py",
             }
-        return {"status": "error", "error": f"HTTP {e.code}: {e.read().decode()[:200]}"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": f"Z.AI respondió HTTP {e.code}."}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"status": "error", "error": "No se pudo consultar la cuota de Z.AI."}
 
 
 def _normalise_zai_limits(limits: list[dict]) -> list[dict]:
@@ -967,10 +1081,16 @@ def _normalise_zai_limits(limits: list[dict]) -> list[dict]:
             else (100 - used if used is not None else None)
         )
         details = limit.get("usageDetails") or []
-        if limit_type == "TOKENS_LIMIT":
-            kind = "coding_5h"
-            label = "Modelos GLM · ventana 5h"
-        elif limit_type == "TIME_LIMIT" and details:
+        if limit_type in ("TOKENS_LIMIT", "CREDIT_LIMIT"):
+            unit, number = limit.get("unit"), limit.get("number")
+            minutes = {1: 1440, 3: 60, 5: 1, 6: 10080}.get(unit, 0) * (number or 0)
+            if minutes == 10080:
+                kind, label = "coding_weekly", "Modelos GLM · ventana 7d"
+            elif minutes == 300 or limit_type == "TOKENS_LIMIT" and unit is None:
+                kind, label = "coding_5h", "Modelos GLM · ventana 5h"
+            else:
+                kind, label = "other", "Modelos GLM · otra ventana"
+        elif limit_type == "TIME_LIMIT":
             kind = "mcp_tools"
             label = "Herramientas MCP"
         else:
@@ -983,6 +1103,7 @@ def _normalise_zai_limits(limits: list[dict]) -> list[dict]:
             "label": label,
             "used_percent": used,
             "remaining_percent": remaining,
+            "reset_at": _ts_to_iso(limit["nextResetTime"] / 1000) if isinstance(limit.get("nextResetTime"), (int, float)) else None,
             "reset_in": _ts_to_countdown_ms(limit.get("nextResetTime")),
         }
         if details:

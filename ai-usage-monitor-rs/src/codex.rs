@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::models::{
-    format_countdown_unix, CodexAccount, CodexData, CodexWindow, ResetCredits, ServiceResult,
+    format_countdown_unix, CodexAccount, CodexData, CodexWindow, ResetCredit, ResetCredits, ServiceResult,
 };
 
 fn home_dir() -> Option<PathBuf> {
@@ -198,6 +198,48 @@ fn normalise_window(window: &Value, default_seconds: i64) -> CodexWindow {
     }
 }
 
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn keep_authoritative_count_and_filter_used_and_expired_details() {
+        let credits = normalise_reset_credits(&json!({"available_count": 7, "credits": [
+            {"id": "available", "status": "available", "expires_at": "2099-10-29T01:23:00Z"},
+            {"id": "expired", "status": "available", "expires_at": "2000-01-01T00:00:00Z"},
+            {"id": "used", "status": "redeemed", "expires_at": "2099-10-29T01:23:00Z"}
+        ]}));
+        assert_eq!(credits.available_count, Some(7));
+        assert_eq!(credits.credits.len(), 1);
+        assert_eq!(credits.credits[0].id.as_deref(), Some("available"));
+        let lines = credits.display_lines();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("UTC") && lines[1].contains(':'));
+    }
+}
+
+fn normalise_reset_credits(payload: &Value) -> ResetCredits {
+    let mut credits: Vec<ResetCredit> = payload.get("credits").and_then(Value::as_array)
+        .into_iter().flatten()
+        .filter(|credit| credit.get("status").and_then(Value::as_str) == Some("available")
+            && credit.get("redeemed_at").is_none_or(Value::is_null))
+        .filter(|credit| credit.get("expires_at").and_then(Value::as_str)
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .is_none_or(|expires| expires.with_timezone(&Utc) > Utc::now()))
+        .map(|credit| ResetCredit {
+            id: credit.get("id").and_then(Value::as_str).map(str::to_owned),
+            expires_at: credit.get("expires_at").and_then(Value::as_str).map(str::to_owned),
+        }).collect();
+    credits.sort_by_key(|credit| credit.expires_at.as_deref()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|date| date.timestamp()).unwrap_or(i64::MAX));
+    ResetCredits {
+        available_count: payload.get("available_count").and_then(Value::as_i64)
+            .or(Some(credits.len() as i64)),
+        credits,
+    }
+}
+
 async fn fetch_account_usage(
     client: &reqwest::Client,
     label: &str,
@@ -238,11 +280,20 @@ async fn fetch_account_usage(
         .get("secondary_window")
         .map(|w| normalise_window(w, 7 * 24 * 3600));
 
-    let reset_credits = body
-        .get("rate_limit_reset_credits")
-        .and_then(|r| r.get("available_count"))
-        .and_then(|v| v.as_i64())
-        .map(|count| ResetCredits { available_count: Some(count) });
+    let reset_response = client.get("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("ChatGPT-Account-ID", account_id)
+        .header("Accept", "application/json")
+        .header("User-Agent", "ai-usage-monitor/1.0")
+        .send().await;
+    let reset_payload: Option<Value> = match reset_response {
+        Ok(response) if response.status().is_success() => response.json().await.ok(),
+        _ => None,
+    };
+    let reset_credits = reset_payload.as_ref()
+        .or_else(|| body.get("rate_limit_reset_credits"))
+        .filter(|value| value.is_object())
+        .map(normalise_reset_credits);
 
     Ok(CodexAccount {
         label: label.to_string(),

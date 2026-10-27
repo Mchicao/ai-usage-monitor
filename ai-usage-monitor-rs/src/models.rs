@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +35,24 @@ pub struct CodexWindow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResetCredits {
     pub available_count: Option<i64>,
+    #[serde(default)]
+    pub credits: Vec<ResetCredit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetCredit {
+    pub id: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+impl ResetCredits {
+    pub fn display_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!("{} resets disponibles", self.available_count.unwrap_or(0))];
+        for credit in &self.credits {
+            lines.push(format!("- Reset {}", format_local_datetime(credit.expires_at.as_deref())));
+        }
+        lines
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +80,7 @@ pub struct CodexData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZaiLimit {
     pub kind: String,
-    pub remaining_percent: f64,
+    pub remaining_percent: Option<f64>,
     pub current_prompts: Option<i64>,
     pub max_prompts: Option<i64>,
     pub reset_at: Option<String>,
@@ -74,6 +92,61 @@ pub struct ZaiData {
     pub level: Option<String>,
     pub limits: Vec<ZaiLimit>,
     pub email: Option<String>,
+    pub reset_credits: ZaiResets,
+    pub account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZaiReset {
+    pub kind: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZaiResets {
+    pub status: String,
+    pub credits: Vec<ZaiReset>,
+    pub error: Option<String>,
+}
+
+impl ZaiResets {
+    pub fn unavailable(error: &str) -> Self {
+        Self { status: "error".into(), credits: Vec::new(), error: Some(error.into()) }
+    }
+
+    pub fn display_lines(&self) -> Vec<String> {
+        if self.status != "ok" { return vec![self.error.clone().unwrap_or_else(|| "Tarjetas no disponibles".into())]; }
+        let mut groups = std::collections::BTreeMap::new();
+        for credit in &self.credits {
+            *groups.entry((&credit.expires_at, &credit.kind)).or_insert(0) += 1;
+        }
+        let mut lines = vec![format!("{} resets manuales", self.credits.len())];
+        for ((expires, kind), count) in groups {
+            let window = if kind == "coding_5h" { "5h" } else { "7d" };
+            lines.push(format!("{} × Reset {} {}", count, window, format_local_datetime(Some(expires))));
+        }
+        lines
+    }
+}
+
+impl ZaiData {
+    pub fn display_lines(&self) -> Vec<String> {
+        let mut lines = vec![self.level.as_deref().unwrap_or("Coding Plan").to_uppercase()];
+        for limit in &self.limits {
+            if limit.kind == "mcp_tools" {
+                if let Some(remaining) = limit.remaining_percent { lines.push(format!("MCP: {:.0}% restante", remaining)); }
+            } else if limit.kind == "coding_weekly" {
+                if let Some(remaining) = limit.remaining_percent { lines.push(format!("7d: {:.0}% restante", remaining)); }
+                if limit.reset_at.is_some() { lines.push(format!("Reinicio 7d: {}", format_local_datetime(limit.reset_at.as_deref()))); }
+            } else if limit.kind == "coding_5h" {
+                lines.push(if limit.reset_at.is_some() {
+                    format!("Reinicio 5h: {}", format_local_datetime(limit.reset_at.as_deref()))
+                } else { "Reinicio 5h: no informado".into() });
+            }
+        }
+        lines.extend(self.reset_credits.display_lines());
+        lines
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +164,13 @@ pub struct AllQuotasSnapshot {
     pub codex: ServiceResult<CodexData>,
     pub zai: ServiceResult<ZaiData>,
     pub timestamp: String,
+}
+
+pub fn format_local_datetime(timestamp: Option<&str>) -> String {
+    timestamp
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Local).format("%d/%m %H:%M UTC%:z").to_string())
+        .unwrap_or_else(|| "Hora no disponible".to_string())
 }
 
 pub fn format_countdown(iso_str: Option<&str>) -> String {
