@@ -215,7 +215,7 @@ mod reset_tests {
         assert_eq!(credits.credits[0].id.as_deref(), Some("available"));
         let lines = credits.display_lines();
         assert_eq!(lines.len(), 2);
-        assert!(lines[1].contains("UTC") && lines[1].contains(':'));
+        assert!(lines[1].contains("(hora de Chile)") && lines[1].contains(':'));
     }
 }
 

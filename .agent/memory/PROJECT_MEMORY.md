@@ -65,3 +65,9 @@
 - Autostart nuevo: tarea `AI Usage Monitor Rust`, trigger AtLogOn de `DELL\Usuario`, ejecuta `C:\Users\Usuario\ai-usage-monitor\ai-usage-monitor-rs\target\release\ai-usage-monitor-rs.exe --auto-redeem-resets` con directorio de trabajo `ai-usage-monitor-rs`, RunLevel Limited, reinicio 3×/2 min y sin límite de ejecución.
 - Verificación: se detuvo el Rust previo y se arrancó por la tarea; PID 4672 único, icono de bandeja registrado (`Shell_NotifyIconW NIM_MODIFY`) y snapshot con AGY, Codex y Z.AI completos. El widget Python de `C:\Proyectos` sigue corriendo manualmente (PID 14912); ya no arranca solo.
 - Pendiente conocido: Rust sigue escribiendo su log en `C:\Proyectos\ai-usage-monitor\debug.log` (ruta fija heredada), aunque se ejecute desde este checkout.
+
+### 2026-10-27 — Horas del popup en horario de Chile
+
+- El usuario reportó que los vencimientos del popup mostraban `UTC-03:00` y pidió horario de Chile. El equipo ya usa la zona `Pacific SA Standard Time` (Santiago, DST activo, -03:00), así que la hora era correcta; el problema era la etiqueta.
+- `format_local_datetime` (Rust `models.rs`) y `_format_local_datetime` (`ai_quota_widget.py`) ahora rinden `dd/mm HH:MM (hora de Chile)` usando la zona local del sistema, de modo que el cambio de horario de abril lo aplica Windows.
+- Prueba Rust ajustada (`codex.rs`) para exigir la nueva etiqueta. Validación: 6 pruebas Rust, 25 + 7 Python y Ruff F,E9 correctos; release recompilado y relanzado por la tarea `AI Usage Monitor Rust` (PID 17284, puerto 8420 propio).

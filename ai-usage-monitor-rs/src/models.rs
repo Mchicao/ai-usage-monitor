@@ -169,7 +169,7 @@ pub struct AllQuotasSnapshot {
 pub fn format_local_datetime(timestamp: Option<&str>) -> String {
     timestamp
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Local).format("%d/%m %H:%M UTC%:z").to_string())
+        .map(|value| value.with_timezone(&Local).format("%d/%m %H:%M (hora de Chile)").to_string())
         .unwrap_or_else(|| "Hora no disponible".to_string())
 }
 

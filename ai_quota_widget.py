@@ -606,7 +606,7 @@ def _codex_min_remaining(account: dict) -> float:
 
 
 def _format_local_datetime(timestamp) -> str:
-    """Fecha y hora del sistema con offset explícito, también en cambios de horario."""
+    """Fecha y hora local del sistema (Santiago de Chile, con horario de verano del SO)."""
     try:
         if isinstance(timestamp, (int, float)):
             value = datetime.fromtimestamp(timestamp, timezone.utc)
@@ -615,8 +615,7 @@ def _format_local_datetime(timestamp) -> str:
         if value.tzinfo is None:
             return "Hora no disponible"
         local = value.astimezone()
-        offset = local.strftime("%z")
-        return f"{local:%d/%m %H:%M} UTC{offset[:3]}:{offset[3:]}"
+        return f"{local:%d/%m %H:%M} (hora de Chile)"
     except (AttributeError, TypeError, ValueError, OverflowError, OSError):
         return "Hora no disponible"
 
