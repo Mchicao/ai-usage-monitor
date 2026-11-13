@@ -47,6 +47,7 @@ def fetch_quota_data() -> dict:
             timeout=90,
             cwd=SCRIPT_DIR,
             encoding="utf-8",
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         if result.returncode == 0:
             data = json.loads(result.stdout)

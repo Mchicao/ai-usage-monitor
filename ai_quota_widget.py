@@ -15,6 +15,10 @@ Modos de uso:
 """
 
 import base64
+import ctypes
+from ctypes import wintypes
+import shutil
+import urllib.parse
 import glob
 import json
 import os
@@ -26,6 +30,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from scripts.utils.zcode_session import read_zcode_session
 
 # ─── Configuración ───
 
@@ -60,6 +65,478 @@ ZAI_PLAN_LIMITS = {
 
 
 # ═══════════════════════════════════════════════════════
+ANTIGRAVITY_USAGE_COMMAND = os.environ.get("AI_ANTIGRAVITY_USAGE_COMMAND", "")
+
+AGY_CREDENTIAL_TARGET = os.environ.get("AI_AGY_CREDENTIAL_TARGET", "gemini:antigravity")
+
+AGY_OAUTH_CLIENT_ID = os.environ.get(
+    "AI_AGY_OAUTH_CLIENT_ID",
+    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+)
+
+AGY_OAUTH_CLIENT_SECRET_FILE = os.environ.get("AI_AGY_OAUTH_CLIENT_SECRET_FILE", "")
+
+AGY_CLOUDCODE_BASE_URL = os.environ.get(
+    "AI_AGY_CLOUDCODE_BASE_URL", "https://daily-cloudcode-pa.googleapis.com"
+)
+
+ZAI_PLATFORM_TOKEN = os.environ.get("ZAI_PLATFORM_TOKEN", "")
+
+ZAI_PLATFORM_TOKEN_FILE = os.environ.get(
+    "ZAI_PLATFORM_TOKEN_FILE",
+    os.path.join(HERMES_HOME, ".zai_platform_token.txt"),
+)
+
+ZAI_SESSION_FILE = os.environ.get(
+    "ZAI_SESSION_FILE",
+    os.path.join(HERMES_HOME, ".zai_session.json"),
+)
+
+ZAI_API_KEY = os.environ.get("ZAI_API_KEY", os.environ.get("GLM_API_KEY", ""))
+
+ZAI_API_KEY_FILE = os.environ.get(
+    "ZAI_API_KEY_FILE",
+    os.path.expanduser("~/.local/share/opencode/auth.json"),
+)
+
+ZAI_ORG_ID = os.environ.get(
+    "ZAI_ORG_ID", "org-2363d4ce091a445D936A7D3B5EB0C57C"
+)
+
+ZAI_PROJECT_ID = os.environ.get(
+    "ZAI_PROJECT_ID", "proj_F7F3eC68baF047658a790bcAA12B68d4"
+)
+
+class _WindowsCredential(ctypes.Structure):
+    _fields_ = [
+        ("Flags", wintypes.DWORD),
+        ("Type", wintypes.DWORD),
+        ("TargetName", wintypes.LPWSTR),
+        ("Comment", wintypes.LPWSTR),
+        ("LastWritten", wintypes.FILETIME),
+        ("CredentialBlobSize", wintypes.DWORD),
+        ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+        ("Persist", wintypes.DWORD),
+        ("AttributeCount", wintypes.DWORD),
+        ("Attributes", ctypes.c_void_p),
+        ("TargetAlias", wintypes.LPWSTR),
+        ("UserName", wintypes.LPWSTR),
+    ]
+
+def _read_windows_generic_credential(target: str) -> dict | None:
+    """Lee una credencial genérica de Windows sin imprimir ni persistir su secreto."""
+    if os.name != "nt" or not target:
+        return None
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    credential_ptr = ctypes.POINTER(_WindowsCredential)()
+    advapi32.CredReadW.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.POINTER(_WindowsCredential)),
+    ]
+    advapi32.CredReadW.restype = wintypes.BOOL
+    advapi32.CredFree.argtypes = [ctypes.c_void_p]
+    if not advapi32.CredReadW(target, 1, 0, ctypes.byref(credential_ptr)):
+        return None
+    try:
+        credential = credential_ptr.contents
+        blob = bytes(credential.CredentialBlob[: credential.CredentialBlobSize])
+        payload = json.loads(blob.decode("utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (UnicodeDecodeError, TypeError, json.JSONDecodeError):
+        return None
+    finally:
+        advapi32.CredFree(credential_ptr)
+
+def _antigravity_oauth_client_secret() -> str:
+    """Obtiene el secreto público del cliente desde configuración o el paquete local."""
+    if AGY_OAUTH_CLIENT_SECRET_FILE:
+        try:
+            with open(AGY_OAUTH_CLIENT_SECRET_FILE, encoding="utf-8") as handle:
+                secret = handle.read().strip()
+            if secret:
+                return secret
+        except OSError:
+            pass
+
+    command = _antigravity_usage_command()
+    candidates = []
+    if command:
+        command_dir = os.path.dirname(os.path.abspath(command))
+        candidates.extend(
+            [
+                os.path.join(command_dir, "node_modules", "antigravity-usage", "dist", "index.js"),
+                os.path.join(os.path.dirname(command_dir), "node_modules", "antigravity-usage", "dist", "index.js"),
+            ]
+        )
+    for package_path in candidates:
+        try:
+            with open(package_path, encoding="utf-8") as handle:
+                source = handle.read()
+            match = re.search(r'clientSecret:.*?\|\|\s*"([^"]+)"', source)
+            if match:
+                return match.group(1)
+        except OSError:
+            continue
+    return ""
+
+def _refresh_antigravity_access_token(refresh_token: str) -> str | None:
+    """Renueva en memoria el access token guardado por AGY en Windows."""
+    client_secret = _antigravity_oauth_client_secret()
+    if not refresh_token or not client_secret:
+        return None
+    payload = urllib.parse.urlencode(
+        {
+            "refresh_token": refresh_token,
+            "client_id": AGY_OAUTH_CLIENT_ID,
+            "client_secret": client_secret,
+            "grant_type": "refresh_token",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        "https://oauth2.googleapis.com/token", data=payload, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read())
+        token = data.get("access_token")
+        return token if isinstance(token, str) and token else None
+    except (OSError, TypeError, json.JSONDecodeError):
+        return None
+
+def _antigravity_keyring_access_token() -> str | None:
+    """Obtiene un token fresco desde la credencial nativa que usa `agy`."""
+    credentials = _read_windows_generic_credential(AGY_CREDENTIAL_TARGET)
+    token_data = credentials.get("token") if isinstance(credentials, dict) else None
+    if not isinstance(token_data, dict):
+        return None
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    if isinstance(access_token, str) and access_token and isinstance(refresh_token, str):
+        refreshed = _refresh_antigravity_access_token(refresh_token)
+        return refreshed or access_token
+    return access_token if isinstance(access_token, str) and access_token else None
+
+def _cloudcode_post(endpoint: str, access_token: str, payload: dict) -> dict:
+    """Ejecuta una llamada JSON al backend de cuota de Antigravity con fallback."""
+    bases = [AGY_CLOUDCODE_BASE_URL]
+    if "daily" in AGY_CLOUDCODE_BASE_URL:
+        bases.append("https://cloudcode-pa.googleapis.com")
+    else:
+        bases.append("https://daily-cloudcode-pa.googleapis.com")
+
+    last_error = None
+    for base in bases:
+        request = urllib.request.Request(
+            f"{base}/v1internal:{endpoint}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "User-Agent": "antigravity",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = json.loads(response.read())
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise last_error
+    return {}
+
+def _get_antigravity_quota_from_keyring() -> dict:
+    """Consulta la cuota de AGY CLI usando su credencial de Windows y Cloud Code."""
+    access_token = _antigravity_keyring_access_token()
+    if not access_token:
+        return {"status": "error", "error": "Credencial gemini:antigravity no disponible"}
+
+    metadata = {
+        "ideType": "ANTIGRAVITY",
+        "platform": "PLATFORM_UNSPECIFIED",
+        "pluginType": "GEMINI",
+    }
+    loaded = _cloudcode_post("loadCodeAssist", access_token, {"metadata": metadata})
+    project_id = loaded.get("cloudaicompanionProject")
+    if not project_id:
+        allowed_tiers = loaded.get("allowedTiers") or []
+        tier = next((item for item in allowed_tiers if item.get("isDefault")), None)
+        tier = tier or next((item for item in allowed_tiers if item.get("id")), None)
+        if tier and tier.get("id"):
+            onboarded = _cloudcode_post(
+                "onboardUser", access_token, {"tierId": tier["id"], "metadata": metadata}
+            )
+            project_id = ((onboarded.get("response") or {}).get("cloudaicompanionProject"))
+    if not isinstance(project_id, str) or not project_id:
+        return {"status": "error", "error": "AGY no devolvió un proyecto de Cloud Code"}
+
+    # 1. Consultar resumen de cuota por grupos (contiene límites reales 5h y semanal)
+    summary = {}
+    try:
+        summary = _cloudcode_post(
+            "retrieveUserQuotaSummary", access_token, {"project": project_id}
+        )
+    except Exception:
+        summary = {}
+
+    # 2. Consultar catálogo de modelos individuales
+    available = {}
+    try:
+        available = _cloudcode_post(
+            "fetchAvailableModels", access_token, {"project": project_id}
+        )
+    except Exception:
+        available = {}
+
+    models = available.get("models") if isinstance(available, dict) else {}
+    model_rows = []
+    if isinstance(models, dict):
+        for model_id, model_data in models.items():
+            quota_info = model_data.get("quotaInfo") or {}
+            remaining = quota_info.get("remainingFraction")
+            if remaining is None:
+                continue
+            model_rows.append(
+                {
+                    "modelId": model_id,
+                    "label": model_id,
+                    "remainingPercentage": float(remaining),
+                    "resetTime": quota_info.get("resetTime"),
+                }
+            )
+
+    summary_groups = summary.get("groups") if isinstance(summary, dict) else None
+    if isinstance(summary_groups, list) and summary_groups:
+        groups = _normalise_antigravity_summary_groups(summary_groups, model_rows)
+    elif model_rows:
+        groups = _normalise_antigravity_groups(model_rows)
+    else:
+        return {"status": "error", "error": "AGY no devolvió ventanas de cuota"}
+
+    return {
+        "status": "ok",
+        "data": {
+            "models": model_rows,
+            "groups": groups,
+            "tier": loaded.get("paidTier") or loaded.get("currentTier"),
+        },
+        "source": "AGY CLI Windows Credential Manager + Cloud Code",
+    }
+
+def _antigravity_usage_command() -> str | None:
+    """Encuentra el shim instalado aunque el monitor arranque desde Task Scheduler."""
+    candidates = []
+    if ANTIGRAVITY_USAGE_COMMAND:
+        candidates.append(ANTIGRAVITY_USAGE_COMMAND)
+    discovered = shutil.which("antigravity-usage")
+    if discovered:
+        candidates.append(discovered)
+
+    prefixes = [os.environ.get("NPM_CONFIG_PREFIX", "")]
+    prefixes.append(os.path.join(os.environ.get("APPDATA", ""), "npm"))
+    for prefix in prefixes:
+        if prefix:
+            candidates.append(os.path.join(prefix, "antigravity-usage.cmd"))
+
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if local_app_data:
+        candidates.append(
+            os.path.join(
+                local_app_data,
+                "Zed",
+                "external_agents",
+                "registry",
+                "npx",
+                "codex-acp",
+                "antigravity-usage.cmd",
+            )
+        )
+
+    for candidate in candidates:
+        if os.path.isfile(candidate) or shutil.which(candidate):
+            return candidate
+    return None
+
+def cleanup_orphan_mei(max_age_seconds: int = 1800) -> None:
+    """Borra carpetas _MEI* de PyInstaller que el harness de Antigravity deja en Temp.
+
+    El localharness de Antigravity extrae ~0,9 GB por ejecución y no siempre se
+    limpia al salir; sin este barrido Temp crece hasta llenar el disco. Solo se
+    tocan carpetas con más de max_age_seconds de antigüedad; las de procesos
+    vivos tienen sus DLL bloqueadas y shutil las deja parcialmente intactas.
+    """
+    temp_dir = os.environ.get("TEMP", "")
+    if not temp_dir:
+        return
+    cutoff = time.time() - max_age_seconds
+    try:
+        entries = list(os.scandir(temp_dir))
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.startswith("_MEI"):
+            continue
+        try:
+            if not entry.is_dir() or entry.stat().st_mtime > cutoff:
+                continue
+            shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
+
+def _iso_to_countdown(iso_str: str | None) -> str:
+    """Convierte timestamp ISO (ej: '2026-09-08T01:49:44Z') a countdown legible (ej: '2h 48m' o '2d 22h')."""
+    if not iso_str:
+        return "N/A"
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        diff = dt - now
+        total_secs = diff.total_seconds()
+        if total_secs <= 0:
+            return "Ya reseteado"
+        hours = int(total_secs // 3600)
+        mins = int((total_secs % 3600) // 60)
+        if hours >= 24:
+            days = hours // 24
+            rem_hours = hours % 24
+            return f"{days}d {rem_hours}h"
+        return f"{hours}h {mins}m"
+    except Exception:
+        return "N/A"
+
+def _normalise_antigravity_summary_groups(
+    summary_groups: list[dict], model_rows: list[dict] | None = None
+) -> list[dict]:
+    """Extrae las cuotas 5h y semanal de cada familia desde retrieveUserQuotaSummary."""
+    groups = []
+    model_rows = model_rows or []
+
+    for item in summary_groups:
+        display_name = item.get("displayName", "")
+        family = "Gemini" if "gemini" in display_name.lower() else "Claude y GPT"
+
+        remaining_5h = None
+        reset_5h_at = None
+        desc_5h = ""
+        weekly_remaining = None
+        reset_weekly_at = None
+        desc_weekly = ""
+
+        for bucket in item.get("buckets", []):
+            window = (bucket.get("window") or "").lower()
+            bucket_id = (bucket.get("bucketId") or "").lower()
+            frac = bucket.get("remainingFraction")
+            pct = round(float(frac) * 100, 1) if frac is not None else 100.0
+            reset_t = bucket.get("resetTime")
+            desc = bucket.get("description", "")
+
+            if "5h" in window or "5h" in bucket_id:
+                remaining_5h = pct
+                reset_5h_at = reset_t
+                desc_5h = desc
+            elif "week" in window or "weekly" in bucket_id:
+                weekly_remaining = pct
+                reset_weekly_at = reset_t
+                desc_weekly = desc
+
+        if model_rows:
+            if family == "Gemini":
+                count = sum(1 for m in model_rows if "gemini" in str(m.get("label", "")).lower())
+            else:
+                count = sum(1 for m in model_rows if "gemini" not in str(m.get("label", "")).lower())
+        else:
+            count = 18 if family == "Gemini" else 7
+
+        groups.append(
+            {
+                "label": family,
+                "remaining_5h_percent": remaining_5h if remaining_5h is not None else 100.0,
+                "reset_5h_at": reset_5h_at,
+                "reset_5h_in": _iso_to_countdown(reset_5h_at),
+                "description_5h": desc_5h,
+                "weekly_remaining_percent": weekly_remaining,
+                "reset_weekly_at": reset_weekly_at,
+                "reset_weekly_in": _iso_to_countdown(reset_weekly_at),
+                "description_weekly": desc_weekly,
+                "model_count": count,
+            }
+        )
+
+    groups.sort(key=lambda g: 0 if g["label"] == "Gemini" else 1)
+    return groups
+
+def _read_zai_platform_token() -> str:
+    """Lee un token explícitamente configurado sin imprimirlo ni persistirlo."""
+    if ZAI_PLATFORM_TOKEN.strip():
+        return ZAI_PLATFORM_TOKEN.strip()
+
+    for path in (ZAI_PLATFORM_TOKEN_FILE, ZAI_SESSION_FILE):
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            if path == ZAI_PLATFORM_TOKEN_FILE:
+                with open(path, encoding="utf-8") as handle:
+                    token = handle.read().strip()
+                if token:
+                    return token
+                continue
+
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict):
+                for key in ("platform_token", "zai_platform_token", "access_token", "jwt"):
+                    token = payload.get(key)
+                    if isinstance(token, str) and token.strip():
+                        return token.strip()
+        except (OSError, TypeError, json.JSONDecodeError):
+            continue
+    return ""
+
+def _read_zai_api_key() -> str:
+    """Descubre el API key de Z.AI usado por OpenCode sin imprimirlo."""
+    if ZAI_API_KEY.strip():
+        return ZAI_API_KEY.strip()
+    try:
+        with open(ZAI_API_KEY_FILE, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        provider = payload.get("zai-coding-plan") if isinstance(payload, dict) else None
+        key = provider.get("key") if isinstance(provider, dict) else None
+        return key.strip() if isinstance(key, str) else ""
+    except (OSError, TypeError, AttributeError, json.JSONDecodeError):
+        return ""
+
+def _get_zai_quota_with_api_key(api_key: str) -> dict:
+    """Consulta la cuota con el formato de autenticación usado por OpenCode."""
+    import urllib.request
+
+    url = "https://api.z.ai/api/monitor/usage/quota/limit"
+    req = urllib.request.Request(url)
+    # Z.AI espera el API key directamente, no el prefijo Bearer, en este endpoint.
+    req.add_header("Authorization", api_key)
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+        data = body.get("data", {})
+        return {
+            "status": "ok",
+            "data": {
+                "level": data.get("level", "unknown"),
+                "limits": _normalise_zai_limits(data.get("limits", [])),
+                "email": None,
+            },
+            "source": "Z.AI quota API key",
+        }
+    except urllib.error.HTTPError as e:
+        return {"status": "error", "error": f"HTTP {e.code}: {e.read().decode()[:200]}"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 def _ts_to_iso(ts) -> str | None:
     """Convierte timestamp Unix o ISO a ISO string."""
     if not ts:
@@ -235,8 +712,17 @@ def get_antigravity_quota() -> dict:
         return cached
 
     try:
+        direct = _get_antigravity_quota_from_keyring()
+        if direct.get("status") == "ok":
+            direct["data"]["stale"] = False
+            _save_last_known(direct)
+            return direct
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, urllib.error.HTTPError):
+        pass
+
+    try:
         result = _run_quota_command(
-            ["antigravity-usage", "quota", "--json", "--refresh"],
+            [_antigravity_usage_command() or "antigravity-usage", "quota", "--json", "--refresh"],
             shell=True,
         )
         if result.returncode == 0:
@@ -286,7 +772,7 @@ def get_antigravity_quota() -> dict:
 
 
 def _normalise_antigravity_groups(models: list[dict]) -> list[dict]:
-    """Colapsa aliases que comparten la misma ventana 5h; weekly no viene en esta API."""
+    """Colapsa aliases por familia usando la menor cuota y el primer reset disponible."""
     groups = {}
     for model in models:
         raw_remaining = model.get("remainingPercentage")
@@ -303,8 +789,8 @@ def _normalise_antigravity_groups(models: list[dict]) -> list[dict]:
             continue
         label = str(model.get("label") or model.get("modelId") or "")
         family = _antigravity_family(label)
-        key = (family, round(float(remaining), 6), reset_at)
-        groups.setdefault(
+        key = family
+        group = groups.setdefault(
             key,
             {
                 "label": family,
@@ -316,7 +802,12 @@ def _normalise_antigravity_groups(models: list[dict]) -> list[dict]:
                 "reset_weekly_in": None,
                 "model_count": 0,
             },
-        )["model_count"] += 1
+        )
+        group["remaining_5h_percent"] = min(group["remaining_5h_percent"], round(remaining * 100, 1))
+        if reset_at and (not group["reset_5h_at"] or str(reset_at) < str(group["reset_5h_at"])):
+            group["reset_5h_at"] = reset_at
+            group["reset_5h_in"] = _ts_to_countdown(reset_at)
+        group["model_count"] += 1
     return list(groups.values())
 
 
@@ -334,13 +825,12 @@ def _jwt_claims(token: str) -> dict:
 
 def _local_zai_email() -> str | None:
     """Lee sólo el correo del JWT local de Z.AI; nunca devuelve el token."""
-    token_path = os.path.expanduser("~/AppData/Local/hermes/.zai_platform_token.txt")
+    token = _read_zai_platform_token()
     try:
-        with open(token_path, encoding="utf-8") as handle:
-            customer = _jwt_claims(handle.read().strip()).get("customer") or {}
+        customer = _jwt_claims(token).get("customer") or {}
         email = customer.get("email") if isinstance(customer, dict) else None
         return email if isinstance(email, str) and "@" in email else None
-    except (OSError, IndexError, ValueError, TypeError, json.JSONDecodeError):
+    except (IndexError, ValueError, TypeError, json.JSONDecodeError):
         return None
 
 
@@ -497,6 +987,8 @@ def _normalise_codex_resets(
             if exp_str:
                 try:
                     exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+                    if exp_dt.tzinfo is None:
+                        exp_dt = None
                 except Exception:
                     pass
             countdown = "N/A"
@@ -517,7 +1009,7 @@ def _normalise_codex_resets(
                         countdown = f"{days}d {hours}h"
                     else:
                         countdown = f"{hours}h {mins}m"
-                date_str = f"{exp_dt.day:02d}/{exp_dt.month:02d}"
+                date_str = _format_local_datetime(exp_str)
 
             if not is_expired:
                 credits_list.append({
@@ -530,7 +1022,8 @@ def _normalise_codex_resets(
 
     if credits_list:
         credits_list.sort(key=lambda x: x["exp_dt"] or datetime.max.replace(tzinfo=timezone.utc))
-        avail = len(credits_list)
+        if not reset_credits_payload or reset_credits_payload.get("available_count") is None:
+            avail = len(credits_list)
 
     if avail == 0:
         summary = "Sin resets disponibles"
@@ -539,28 +1032,7 @@ def _normalise_codex_resets(
         summary = f"{avail} disponibles" if avail > 1 else f"{avail} disponible"
         short_summary = f"{avail} disp."
     else:
-        from collections import OrderedDict
-
-        by_date = OrderedDict()
-        for c in credits_list:
-            d = c["date"]
-            if d not in by_date:
-                by_date[d] = []
-            by_date[d].append(c)
-
-        parts = []
-        is_first = True
-        for d, items in by_date.items():
-            count = len(items)
-            first_countdown = items[0]["countdown"]
-            if is_first:
-                if count > 1:
-                    parts.append(f"{count} el {d} ({first_countdown})")
-                else:
-                    parts.append(f"1 el {d} ({first_countdown})")
-                is_first = False
-            else:
-                parts.append(f"{count} el {d}")
+        parts = [f"Reset {credit['date']} ({credit['countdown']})" for credit in credits_list]
         summary = " · ".join(parts)
         short_summary = f"{avail} disp. ({parts[0]})"
 
@@ -573,6 +1045,7 @@ def _normalise_codex_resets(
         "summary": summary,
         "short_summary": short_summary,
     }
+
 
 
 def _fetch_codex_account(label: str, token: str, account_id: str) -> dict:
@@ -764,53 +1237,41 @@ def get_zai_quota() -> dict:
     """
     Obtiene la cuota REAL de Z.AI Coding Plan desde la API interna.
     Endpoint: GET https://api.z.ai/api/monitor/usage/quota/limit
-    Requiere: platform JWT + bigmodel-organization + bigmodel-project headers.
-    El JWT se extrae del navegador (Thorium Local Storage).
+    Prefiere la sesión ZCode; conserva fuentes explícitas cuando no está instalada.
     """
     import urllib.error
     import urllib.request
 
-    # Leer el platform token
-    token_path = os.path.expanduser("~/AppData/Local/hermes/.zai_platform_token.txt")
-    if not os.path.exists(token_path):
-        return {
-            "status": "error",
-            "error": "No hay platform token de Z.AI",
-            "hint": "Ejecuta extract_zai_cookies.py o abre z.ai en tu navegador",
-        }
-
-    with open(token_path) as f:
-        token = f.read().strip()
-    email = _local_zai_email()
-
-    # Valores por defecto de org/project (extraídos de la cuenta del usuario)
-    org = "org-2363d4ce091a445D936A7D3B5EB0C57C"
-    proj = "proj_F7F3eC68baF047658a790bcAA12B68d4"
-
+    try:
+        session = read_zcode_session()
+    except ValueError as error:
+        return {"status": "error", "error": str(error)}
+    if session:
+        return _get_zcode_zai_quota(session)
+    api_key = _read_zai_api_key()
+    token = os.environ.get("ZAI_PLATFORM_TOKEN", "").strip()
+    if not api_key and not token:
+        token_path = os.environ.get("ZAI_PLATFORM_TOKEN_FILE", os.path.expanduser("~/AppData/Local/hermes/.zai_platform_token.txt"))
+        try:
+            with open(token_path, encoding="utf-8") as handle:
+                token = handle.read().strip()
+        except OSError:
+            pass
+    if not api_key and not token:
+        return {"status": "error", "error": "Falta autenticación de Z.AI. Configura ZAI_API_KEY o inicia sesión en OpenCode."}
     url = "https://api.z.ai/api/monitor/usage/quota/limit"
     req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("bigmodel-organization", org)
-    req.add_header("bigmodel-project", proj)
+    req.add_header("Authorization", api_key or f"Bearer {token}")
+    if not api_key:
+        for name, env in (("bigmodel-organization", "ZAI_ORG_ID"), ("bigmodel-project", "ZAI_PROJECT_ID")):
+            if os.environ.get(env):
+                req.add_header(name, os.environ[env])
     req.add_header("Accept", "application/json")
 
     try:
-        resp = urllib.request.urlopen(req, timeout=15)
-        body = json.loads(resp.read())
-        data = body.get("data", {})
-        limits = data.get("limits", [])
-        level = data.get("level", "unknown")
-
-        result_limits = _normalise_zai_limits(limits)
-
-        return {
-            "status": "ok",
-            "data": {
-                "level": level,
-                "limits": result_limits,
-                "email": email,
-            },
-        }
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.load(resp)
+        return _normalise_zai_response(body)
     except urllib.error.HTTPError as e:
         if e.code == 401:
             return {
@@ -818,9 +1279,10 @@ def get_zai_quota() -> dict:
                 "error": "Token expirado",
                 "hint": "Abre z.ai en tu navegador y ejecuta extract_zai_cookies.py",
             }
-        return {"status": "error", "error": f"HTTP {e.code}: {e.read().decode()[:200]}"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": f"Z.AI respondió HTTP {e.code}."}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"status": "error", "error": "No se pudo consultar la cuota de Z.AI."}
+
 
 
 def _normalise_zai_limits(limits: list[dict]) -> list[dict]:
@@ -837,10 +1299,16 @@ def _normalise_zai_limits(limits: list[dict]) -> list[dict]:
             else (100 - used if used is not None else None)
         )
         details = limit.get("usageDetails") or []
-        if limit_type == "TOKENS_LIMIT":
-            kind = "coding_5h"
-            label = "Modelos GLM · ventana 5h"
-        elif limit_type == "TIME_LIMIT" and details:
+        if limit_type in ("TOKENS_LIMIT", "CREDIT_LIMIT"):
+            unit, number = limit.get("unit"), limit.get("number")
+            minutes = {1: 1440, 3: 60, 5: 1, 6: 10080}.get(unit, 0) * (number or 0)
+            if minutes == 10080:
+                kind, label = "coding_weekly", "Modelos GLM · ventana 7d"
+            elif minutes == 300 or limit_type == "TOKENS_LIMIT" and unit is None:
+                kind, label = "coding_5h", "Modelos GLM · ventana 5h"
+            else:
+                kind, label = "other", "Modelos GLM · otra ventana"
+        elif limit_type == "TIME_LIMIT":
             kind = "mcp_tools"
             label = "Herramientas MCP"
         else:
@@ -853,12 +1321,14 @@ def _normalise_zai_limits(limits: list[dict]) -> list[dict]:
             "label": label,
             "used_percent": used,
             "remaining_percent": remaining,
+            "reset_at": _ts_to_iso(limit["nextResetTime"] / 1000) if isinstance(limit.get("nextResetTime"), (int, float)) else None,
             "reset_in": _ts_to_countdown_ms(limit.get("nextResetTime")),
         }
         if details:
             item["models"] = {detail["modelCode"]: detail["usage"] for detail in details}
         result.append(item)
     return result
+
 
 
 def _ts_to_countdown_ms(ts_ms) -> str:
@@ -1145,6 +1615,123 @@ def main():
         except KeyboardInterrupt:
             print("\n\n  👋 ¡Hasta luego!")
             break
+
+
+def _format_local_datetime(timestamp) -> str:
+    """Fecha y hora del sistema con offset explícito, también en cambios de horario."""
+    try:
+        if isinstance(timestamp, (int, float)):
+            value = datetime.fromtimestamp(timestamp, timezone.utc)
+        else:
+            value = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            return "Hora no disponible"
+        local = value.astimezone()
+        offset = local.strftime("%z")
+        return f"{local:%d/%m %H:%M} UTC{offset[:3]}:{offset[3:]}"
+    except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+        return "Hora no disponible"
+
+
+def _normalise_zai_response(body: dict) -> dict:
+    """HTTP 200 puede contener un rechazo; exigir límites antes de declarar éxito."""
+    if body.get("success") is False:
+        code = body.get("code")
+        code = str(code) if isinstance(code, (int, float)) else "desconocido"
+        return {"status": "error", "error": f"Z.AI rechazó la consulta (código {code}). Revisa tu autenticación."}
+    data = body.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("limits"), list) or not data["limits"]:
+        return {"status": "error", "error": "Z.AI no devolvió límites de Coding Plan."}
+    return {"status": "ok", "data": {
+        "level": data.get("level") or "Coding Plan",
+        "limits": _normalise_zai_limits(data["limits"]),
+        "email": None,
+    }}
+
+
+def _zai_request(url: str, headers: dict) -> dict:
+    request = urllib.request.Request(url, headers={"Accept": "application/json", **headers})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = json.load(response)
+    if not isinstance(body, dict):
+        raise ValueError("Respuesta Z.AI no válida")
+    return body
+
+
+def _normalise_zai_resets(body: dict) -> dict:
+    data = body.get("data")
+    if type(body.get("code")) is not int or body["code"] != 0 or not isinstance(data, dict):
+        return {"status": "error", "error": "No se pudieron consultar las tarjetas Z.AI."}
+    credits = []
+    for field, kind in (("available_five_hour_resets", "coding_5h"), ("available_week_resets", "coding_weekly")):
+        items = data.get(field)
+        if not isinstance(items, list):
+            return {"status": "error", "error": "Z.AI devolvió un inventario de tarjetas no válido."}
+        for item in items:
+            expiry = item.get("expire_at") if isinstance(item, dict) else None
+            if type(expiry) not in (int, float) or expiry <= 0:
+                return {"status": "error", "error": "Z.AI devolvió un vencimiento no válido."}
+            if expiry > time.time() * 1000:
+                credits.append({"kind": kind, "expires_at": datetime.fromtimestamp(expiry / 1000, timezone.utc).isoformat()})
+    credits.sort(key=lambda credit: credit["expires_at"])
+    return {"status": "ok", "available_count": len(credits), "credits": credits}
+
+
+def _get_zcode_zai_quota(session: dict) -> dict:
+    """Cuota y tarjetas conservan sus errores por separado y usan la misma sesión."""
+    try:
+        result = _normalise_zai_response(_zai_request(
+            "https://api.z.ai/api/monitor/usage/quota/limit", {"Authorization": session["platform_token"]}))
+    except (OSError, ValueError, TypeError):
+        result = {"status": "error", "error": "No se pudo consultar la cuota Z.AI con ZCode."}
+    data = result.setdefault("data", {"level": "Coding Plan", "limits": []})
+    data["email"] = session.get("email")
+    resets = {"status": "error", "error": "Falta la sesión ZCode para consultar tarjetas."}
+    if session.get("zcode_token"):
+        token = session["zcode_token"]
+        try:
+            resets = _normalise_zai_resets(_zai_request("https://zcode.z.ai/api/v1/coding-plan/reset/status", {
+                "Authorization": token if token.lower().startswith("bearer ") else f"Bearer {token}",
+                "X-Bigmodel-Authorization": session["platform_token"],
+                "Bigmodel-Target-Type": "PERSONAL",
+            }))
+        except (OSError, ValueError, TypeError):
+            resets = {"status": "error", "error": "No se pudo consultar el inventario de tarjetas Z.AI."}
+    data["reset_credits"] = resets
+    result["source"] = "ZCode"
+    return result
+
+
+def zai_popup_data(result: dict) -> dict:
+    """Presenta cuotas y vencimientos agrupando tarjetas idénticas sin ocultar errores."""
+    from collections import Counter
+
+    data = result.get("data") or {}
+    limits = data.get("limits") or []
+    coding = next((limit for limit in limits if limit.get("kind") == "coding_5h"), {})
+    lines = [(data.get("level") or "Coding Plan").upper()]
+    if result.get("status") != "ok":
+        lines.append(result.get("error") or "Cuota Z.AI no disponible")
+    for limit in limits:
+        if limit.get("kind") == "mcp_tools" and limit.get("remaining_percent") is not None:
+            lines.append(f"MCP: {limit['remaining_percent']:.0f}% restante")
+        if limit.get("kind") == "coding_weekly" and limit.get("remaining_percent") is not None:
+            lines.append(f"7d: {limit['remaining_percent']:.0f}% restante")
+            if limit.get("reset_at"):
+                lines.append(f"Reinicio 7d: {_format_local_datetime(limit['reset_at'])}")
+    if coding:
+        lines.append(f"Reinicio 5h: {_format_local_datetime(coding['reset_at'])}" if coding.get("reset_at") else "Reinicio 5h: no informado")
+    resets = data.get("reset_credits") or {}
+    if resets.get("status") == "ok":
+        credits = resets.get("credits") or []
+        lines.append(f"{len(credits)} resets manuales")
+        groups = Counter((credit["expires_at"], credit["kind"]) for credit in credits)
+        for (expires, kind), count in sorted(groups.items()):
+            window = "5h" if kind == "coding_5h" else "7d"
+            lines.append(f"{count} × Reset {window} {_format_local_datetime(expires)}")
+    else:
+        lines.append(resets.get("error") or "Tarjetas: sesión ZCode no disponible")
+    return {"pct": coding.get("remaining_percent"), "subtitle": "\n".join(lines)}
 
 
 if __name__ == "__main__":

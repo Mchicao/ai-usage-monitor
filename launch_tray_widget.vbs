@@ -7,7 +7,7 @@ Dim shell, fso, pythonw, widget, lockPath, logPath, logFile
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
-pythonw = "C:\Program Files\Python310\pythonw.exe"
+pythonw = "C:\Proyectos\ai-usage-monitor\.venv\Scripts\pythonw.exe"
 widget  = "C:\Proyectos\ai-usage-monitor\win_tray_widget.py"
 lockPath = "C:\Proyectos\ai-usage-monitor\win_tray_widget.lock"
 logPath  = "C:\Proyectos\ai-usage-monitor\launch_tray_widget.log"

@@ -21,6 +21,9 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # ─── Constantes extraídas del código fuente de las extensiones ───
 
 CLOUDCODE_BASE = "https://cloudcode-pa.googleapis.com"
@@ -36,7 +39,21 @@ AG_STATE_PATTERN = os.path.expandvars(
 
 
 def find_antigravity_token():
-    """Busca el token OAuth de Google en el state.vscdb de Antigravity."""
+    """Busca el token OAuth de Google en Windows Credential Manager o en state.vscdb."""
+    try:
+        import ai_quota_widget
+        kr_token = ai_quota_widget._antigravity_keyring_access_token()
+        if kr_token:
+            return {
+                "token": kr_token,
+                "email": "",
+                "source": "Windows Credential Manager (gemini:antigravity)",
+                "key": "gemini:antigravity",
+                "raw": {},
+            }
+    except Exception:
+        pass
+
     patterns = [
         os.path.expandvars(r"%APPDATA%\Antigravity\User\profiles\*\globalStorage\state.vscdb"),
         os.path.expandvars(r"%APPDATA%\Antigravity\User\globalStorage\state.vscdb"),
@@ -80,21 +97,24 @@ def find_antigravity_token():
     return None
 
 
-def fetch_quota_from_google(token: str, base_url: str = CLOUDCODE_BASE) -> dict:
+def fetch_quota_from_google(token: str, base_url: str = CLOUDCODE_DAILY_BASE) -> dict:
     """
     Consulta la API de Google Cloud Code para obtener la cuota.
-    Flujo de 2 pasos:
+    Flujo:
       1. loadCodeAssist → obtiene tier y projectId
-      2. fetchAvailableModels → obtiene cuota por modelo
+      2. retrieveUserQuotaSummary → obtiene cuota por grupo (5h y semanal)
+      3. fetchAvailableModels → obtiene cuota por modelo
     """
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
+        "User-Agent": "antigravity",
     }
 
     result = {
         "tier": None,
         "project_id": None,
+        "groups": [],
         "models": {},
         "error": None,
     }
@@ -115,10 +135,6 @@ def fetch_quota_from_google(token: str, base_url: str = CLOUDCODE_BASE) -> dict:
         result["tier"] = load_resp.get("currentTier", {})
         result["project_id"] = load_resp.get("cloudaicompanionProject", "")
 
-        # Extraer info de tier
-        tiers = load_resp.get("allowedTiers", [])
-        current_tier_id = load_resp.get("currentTier", {}).get("id", "unknown")
-
     except urllib.error.HTTPError as e:
         body = e.read().decode()[:500]
         result["error"] = f"loadCodeAssist failed: HTTP {e.code} - {body}"
@@ -127,7 +143,22 @@ def fetch_quota_from_google(token: str, base_url: str = CLOUDCODE_BASE) -> dict:
         result["error"] = f"loadCodeAssist error: {str(e)}"
         return result
 
-    # ─── Paso 2: fetchAvailableModels ───
+    # ─── Paso 2: retrieveUserQuotaSummary (Límites reales 5h y semanal) ───
+    summary_data = json.dumps({"project": result["project_id"]}).encode()
+    req_summary = urllib.request.Request(
+        f"{base_url}/v1internal:retrieveUserQuotaSummary",
+        data=summary_data,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        resp_sum = urllib.request.urlopen(req_summary, timeout=15)
+        sum_resp = json.loads(resp_sum.read())
+        result["groups"] = sum_resp.get("groups", [])
+    except Exception:
+        result["groups"] = []
+
+    # ─── Paso 3: fetchAvailableModels ───
     models_data = json.dumps({"project": result["project_id"]}).encode()
     req2 = urllib.request.Request(
         f"{base_url}/v1internal:fetchAvailableModels",
@@ -146,7 +177,6 @@ def fetch_quota_from_google(token: str, base_url: str = CLOUDCODE_BASE) -> dict:
             remaining = quota_info.get("remainingFraction")
             reset_time = quota_info.get("resetTime")
 
-            # Si remainingFraction falta, la cuota está agotada (0)
             if remaining is None:
                 remaining = 0.0
 
@@ -185,14 +215,37 @@ def format_output(data: dict) -> str:
     if data.get("email"):
         lines.append(f"👤 Cuenta: {data['email']}")
 
+    # Grupos (Cuotas reales compartidas 5h y semanal)
+    groups = data.get("groups", [])
+    if groups:
+        lines.append("\n📦 Límites por Grupo (Cuota Real Compartida):")
+        lines.append("─" * 52)
+        for g in groups:
+            name = g.get("displayName", "Grupo")
+            lines.append(f"  🔹 {name}")
+            for b in g.get("buckets", []):
+                d_name = b.get("displayName", b.get("bucketId", "Límite"))
+                frac = b.get("remainingFraction", 1.0)
+                pct = round(frac * 100, 1)
+                bar_len = 16
+                filled = int(pct / 100 * bar_len)
+                bar = "█" * filled + "░" * (bar_len - filled)
+                emoji = "🟢" if pct > 50 else "🟡" if pct > 20 else "🔴"
+                lines.append(f"     {emoji} {d_name:<26} {bar} {pct:>5.1f}%")
+                desc = b.get("description")
+                if desc:
+                    lines.append(f"        ↳ {desc}")
+        lines.append("─" * 52)
+
     # Modelos
     models = data.get("models", {})
-    if not models:
-        lines.append("\n⚠️  No se encontraron modelos con información de cuota.")
+    if not models and not groups:
+        lines.append("\n⚠️  No se encontraron modelos ni grupos con información de cuota.")
         return "\n".join(lines)
 
-    lines.append(f"\n📊 Modelos ({len(models)} disponibles):")
-    lines.append("─" * 52)
+    if models:
+        lines.append(f"\n📊 Modelos ({len(models)} disponibles):")
+        lines.append("─" * 52)
 
     for model_name in sorted(models.keys()):
         model = models[model_name]

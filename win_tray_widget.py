@@ -21,7 +21,7 @@ import time
 
 import customtkinter as ctk
 import pystray
-from ai_quota_widget import _ts_to_countdown, codex_windows_with_data, collect_all_quotas
+from ai_quota_widget import cleanup_orphan_mei, _ts_to_countdown, codex_windows_with_data, collect_all_quotas, _format_local_datetime, zai_popup_data
 from PIL import Image, ImageDraw
 
 # ─── Configuración ───
@@ -403,6 +403,11 @@ class FluentPopup(ctk.CTkToplevel):
                 resets_text = f"🔄 {avail} resets disponibles"
             else:
                 resets_text = "🔄 Sin resets disponibles"
+            credits = reset_credits.get("credits") or []
+            if avail > 0 and credits:
+                resets_text = f"🔄 {avail} resets disponibles\n" + "\n".join(
+                    f"- Reset {_format_local_datetime(credit.get('expires_at'))}" for credit in credits
+                )
             if account.get("status") == "error":
                 resets_text = ""
 
@@ -418,6 +423,7 @@ class FluentPopup(ctk.CTkToplevel):
                 )
             )
         return results
+
 
     def _add_codex_card(self, parent, row, title, info):
         """Tarjeta Codex: una fila por ventana (5h/7d) con barra y % grande del restante."""
@@ -499,17 +505,8 @@ class FluentPopup(ctk.CTkToplevel):
             resets_lbl.grid(row=2 + len(windows), column=0, padx=12, pady=(0, 8), sticky="w")
 
     def _get_zi_data(self):
-        d = self.data.get("zai", {})
-        if d.get("status") != "ok":
-            return None
-        level = (d.get("data") or {}).get("level", "?").upper()
-        for lim in (d.get("data") or {}).get("limits", []):
-            if lim.get("kind") == "coding_5h":
-                return {
-                    "pct": lim.get("remaining_percent", 0),
-                    "subtitle": f"{level} · Reset: {lim.get('reset_in', 'N/A')}",
-                }
-        return {"pct": None, "subtitle": level}
+        return zai_popup_data(self.data.get("zai", {}))
+
 
     def _open_web(self):
         close_popup()
@@ -619,6 +616,7 @@ def refresh_loop(icon):
     global latest_data
     while True:
         latest_data = fetch_quota_data()
+        cleanup_orphan_mei()
         if tk_root:
             try:
                 tk_root.after(0, refresh_open_popup)
@@ -654,6 +652,45 @@ def _write_pid_lock():
         pass
 
 
+def _pid_is_alive_python(pid: int) -> bool:
+    """True si el PID sigue vivo y es un python (mitiga PID reutilizado)."""
+    if os.name != "nt" or pid <= 0:
+        return False
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:
+            return False  # STILL_ACTIVE = 259
+        buf = ctypes.create_unicode_buffer(512)
+        if ctypes.windll.psapi.GetModuleFileNameExW(handle, None, buf, 512):
+            return os.path.basename(buf.value).lower().startswith(("python", "pythonw"))
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
+
+def _acquire_pid_lock() -> bool:
+    """False si ya corre otra instancia del widget; True si adquirimos el lock."""
+    lock = os.path.join(SCRIPT_DIR, "win_tray_widget.lock")
+    try:
+        with open(lock, "r", encoding="utf-8") as _f:
+            old_pid = _f.read().strip()
+        if old_pid.isdigit() and int(old_pid) != os.getpid() and _pid_is_alive_python(int(old_pid)):
+            return False
+    except OSError:
+        pass
+    try:
+        with open(lock, "w", encoding="utf-8") as _f:
+            _f.write(str(os.getpid()))
+    except OSError:
+        pass
+    return True
+
+
 def main():
     global tray_icon, latest_data, tk_root
     if "--popup" in sys.argv or "--show" in sys.argv:
@@ -664,7 +701,8 @@ def main():
                     return
         except Exception:
             pass
-    _write_pid_lock()
+    if not _acquire_pid_lock():
+        return
     latest_data = fetch_quota_data()
     tk_root = ctk.CTk()
     tk_root.withdraw()

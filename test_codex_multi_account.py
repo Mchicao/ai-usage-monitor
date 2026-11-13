@@ -396,8 +396,8 @@ class CodexMultiAccountTest(unittest.TestCase):
         res = monitor._normalise_codex_resets(payload)
         self.assertEqual(3, res["available_count"])
         self.assertEqual(3, len(res["credits"]))
-        self.assertIn("2 el 04/10", res["summary"])
-        self.assertIn("1 el 22/10", res["summary"])
+        for credit in payload["credits"]:
+            self.assertIn(f"Reset {monitor._format_local_datetime(credit['expires_at'])}", res["summary"])
 
     def test_normalise_codex_resets_fallback_count(self):
         fallback = {"available_count": 2}

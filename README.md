@@ -49,6 +49,7 @@ Se inicia automáticamente con Windows. Muestra barras en la taskbar para Claude
 ## Detalles técnicos
 
 ### Antigravity IDE
+- **Adaptación Dell**: si la consulta nativa falla sin un snapshot nativo previo, se conserva el acceso local mediante Windows Credential Manager (`gemini:antigravity`) y Cloud Code. El fallback CLI respeta `AI_ANTIGRAVITY_USAGE_COMMAND`.
 - **Fuente**: `agy --print "/usage"`, que expone cuotas separadas por familia y ventana
 - **Auth**: OAuth 2.0 de Google gestionado por `agy`
 - **Datos**: Gemini y Claude/GPT conservan sus ventanas semanal y de 5 horas. Gemini 4 Argon se muestra como grupo separado; si la CLI solo expone su cuota semanal, no se inventa una ventana de 5 horas.
@@ -71,9 +72,11 @@ Se inicia automáticamente con Windows. Muestra barras en la taskbar para Claude
 - El popup abierto se actualiza con cada consulta. Si la consulta nativa de AGY falla, conserva el ultimo resultado nativo como desactualizado; si falla una cuenta GPT, mantiene su tarjeta con el error en vez de ocultarla.
 
 ### Z.AI Coding Plan
-- **Sin endpoint de billing**: Probados 12+ endpoints → todos 404
-- **Estrategia**: Probe HTTP → 200 = disponible, 429 = agotado
-- **Cuota real**: Disponible en `z.ai → Usage Statistics` (requiere login web)
+- **Autenticación**: se prefiere `ZAI_PLATFORM_TOKEN`/`ZAI_PLATFORM_TOKEN_FILE`; si no existen, se reutiliza de forma efímera el API key del proveedor `zai-coding-plan` en el auth store de OpenCode (`ZAI_API_KEY_FILE`).
+- **Sesión de navegador**: el archivo de cookies no se usa como platform token.
+- **Organización/proyecto**: se pueden sobreescribir con `ZAI_ORG_ID` y `ZAI_PROJECT_ID`.
+- **Cuota real**: se consulta en `https://api.z.ai/api/monitor/usage/quota/limit`.
+- **Sin token**: el monitor informa `no configurado`; no inventa porcentajes ni muestra cero.
 - **Límites del plan**:
   - Lite: 80 prompts/5h, 400/semana
   - Pro: 400 prompts/5h, 2000/semana
